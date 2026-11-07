@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>پنل والدین</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.min.js"></script>
+<style>
+:root{--bg:#f6f7fb;--c:#fff;--t:#1d2330;--m:#6b7385;--p:#4f46e5;--g:#16a34a;--r:#dc2626;--b:#e3e6ee}
+@media(prefers-color-scheme:dark){:root{--bg:#12141b;--c:#1c1f2a;--t:#eef0f6;--m:#9aa2b5;--b:#2b3040}}
+*{box-sizing:border-box}body{margin:0;font-family:Tahoma,sans-serif;background:var(--bg);color:var(--t);padding:12px;max-width:640px;margin:auto}
+.card{background:var(--c);border:1px solid var(--b);border-radius:12px;padding:12px;margin:10px 0}
+button{background:var(--p);color:#fff;border:0;border-radius:8px;padding:8px 12px;font:inherit;cursor:pointer}
+button.s{background:var(--b);color:var(--t)}button.g{background:var(--g)}button.r{background:var(--r)}
+textarea{width:100%;min-height:90px;padding:8px;margin:4px 0;border:1px solid var(--b);border-radius:8px;background:var(--bg);color:var(--t);font:inherit}
+input,select{width:100%;padding:8px;margin:4px 0;border:1px solid var(--b);border-radius:8px;background:var(--bg);color:var(--t);font:inherit}
+.row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.row>*{flex:1}.row>button{flex:0 0 auto}
+.tabs{display:flex;gap:4px;overflow-x:auto}.tabs button{background:var(--c);color:var(--t);border:1px solid var(--b)}.tabs button.on{background:var(--p);color:#fff}
+.bar{height:8px;background:var(--b);border-radius:6px;overflow:hidden}.bar i{display:block;height:100%;background:var(--g)}
+.m{color:var(--m);font-size:13px}.big{font-size:28px;font-weight:bold}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+// ===== تنظیمات: مقدار Supabase خودت را اینجا بگذار =====
+const SB_URL = 'https://sfmzprwmjtnbvxylvfim.supabase.co';
+const SB_KEY = 'sb_publishable_5KJd_xQf35GjhN5O_iM8gg_ehU_ZFYy';
+// ========================================================
+const sb = supabase.createClient(SB_URL, SB_KEY);
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fa = n => Number(n).toLocaleString('fa-IR');
+const today = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+const sha = async t => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)))].map(b => b.toString(16).padStart(2, '0')).join('');
+let st = { kids: [], kid: null, tab: 'today', rate: 1000 };
+
+async function boot() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return loginView();
+  const { data: s } = await sb.from('settings').select('*').single();
+  st.rate = s?.toman_per_point ?? 1000;
+  const { data: k } = await sb.from('kids').select('*').eq('active', true).order('name');
+  st.kids = k || [];
+  if (!st.kid || !st.kids.find(x => x.id === st.kid)) st.kid = st.kids[0]?.id || null;
+  render();
+}
+
+function loginView() {
+  $('#app').innerHTML = `<div class="card"><h3>ورود والدین</h3>
+  <input id="em" type="email" placeholder="ایمیل" dir="ltr"><input id="pw" type="password" placeholder="رمز" dir="ltr">
+  <button onclick="login()">ورود</button></div>`;
+}
+async function login() {
+  const { error } = await sb.auth.signInWithPassword({ email: $('#em').value, password: $('#pw').value });
+  error ? alert(error.message) : boot();
+}
+
+let rid = 0; // newest render wins (prevents a slow earlier render from overwriting a newer tab)
+async function render() {
+  const my = ++rid;
+  const kid = st.kids.find(k => k.id === st.kid);
+  const tabs = [['today','امروز'],['tasks','کارها'],['dict','دیکته'],['points','امتیاز'],['wish','آرزوها'],['apps','برنامه‌ها'],['set','تنظیمات']];
+  let h = `<div class="tabs">${st.kids.map(k => `<button class="${k.id===st.kid?'on':''}" onclick="st.kid='${k.id}';render()">${esc(k.name)}</button>`).join('')}
+    <button class="s" onclick="addKid()">+ فرزند</button></div>`;
+  if (!kid) { $('#app').innerHTML = h + '<div class="card">اول یک فرزند اضافه کن.</div>'; return; }
+  h += `<div class="tabs" style="margin-top:8px">${tabs.map(([k,l]) => `<button class="${k===st.tab?'on':''}" onclick="st.tab='${k}';render()">${l}</button>`).join('')}</div>`;
+  h += await views[st.tab](kid);
+  if (my !== rid) return;
+  $('#app').innerHTML = h;
+}
+
+const balance = async id => {
+  const { data } = await sb.from('points_ledger').select('delta').eq('kid_id', id);
+  return (data || []).reduce((a, r) => a + r.delta, 0);
+};
+
+// تولید نوبت‌های امروز از قالب کارها
+async function ensureToday(kid) {
+  const { data: ts } = await sb.from('tasks').select('*').eq('kid_id', kid.id).eq('active', true);
+  const wd = new Date().getDay();
+  const due = (ts || []).filter(t => t.kind === 'daily' || (t.kind === 'weekly' && (t.weekdays || []).includes(wd)));
+  if (due.length) await sb.from('task_logs').upsert(due.map(t => ({ task_id: t.id, kid_id: kid.id, due_date: today() })), { onConflict: 'task_id,due_date', ignoreDuplicates: true });
+}
+
+const views = {
+  async today(kid) {
+    await ensureToday(kid);
+    const { data } = await sb.from('task_logs').select('*, tasks(title,points,needs_photo)').eq('kid_id', kid.id).eq('due_date', today());
+    const bal = await balance(kid.id);
+    const lbl = { pending: 'انجام نشده', submitted: 'منتظر تایید', graded: 'نمره‌دار', approved: 'تایید شد', rejected: 'رد شد' };
+    return `<div class="card"><div class="m">موجودی امتیاز</div><div class="big">${fa(bal)}</div><div class="m">≈ ${fa(bal * st.rate)} تومان</div></div>
+    ${(data || []).map(l => `<div class="card"><b>${esc(l.tasks.title)}</b> <span class="m">(${fa(l.tasks.points)} امتیاز)</span>
+      <div class="m">${lbl[l.status]}${l.ai_score != null ? ` · نمره هوش مصنوعی: ${fa(l.ai_score)}` : ''}${l.ai_feedback ? `<br>${esc(l.ai_feedback)}` : ''}</div>
+      ${l.points_awarded != null && l.status !== 'approved' ? `<div class="m">پیشنهاد امتیاز: ${fa(l.points_awarded)}</div>` : ''}
+      <div class="row" style="margin-top:6px">${l.photo_path ? `<button class="s" onclick="showPhoto('${l.photo_path}')">عکس</button>` : ''}${l.status !== 'approved' ? `<button class="g" onclick="approve('${l.id}')">تایید و امتیاز</button>` : ''}${l.status !== 'rejected' ? `<button class="r" onclick="reject('${l.id}')">${l.status === 'approved' ? 'لغو امتیاز' : 'رد'}</button>` : ''}</div></div>`).join('') || '<div class="card m">برای امروز کاری تعریف نشده.</div>'}`;
+  },
+  async tasks(kid) {
+    const { data } = await sb.from('tasks').select('*').eq('kid_id', kid.id).eq('active', true);
+    return `<div class="card"><b>کار جدید</b><input id="tt" placeholder="عنوان (مثلاً دیکته)">
+      <div class="row"><select id="tk"><option value="daily">روزانه</option><option value="weekly">هفتگی</option><option value="once">یک‌بار</option></select>
+      <input id="tp" type="number" value="5" placeholder="امتیاز"></div>
+      <div class="m">برای هفتگی، روزها (۰=یکشنبه … ۶=شنبه) با ویرگول:</div><input id="twd" placeholder="مثلاً 1,3,5">
+      <label><input type="checkbox" id="tph" style="width:auto"> نیاز به عکس (نمره‌دهی هوش مصنوعی)</label><br>
+      <button onclick="addTask()">افزودن</button></div>
+      ${(data || []).map(t => `<div class="card row"><span>${esc(t.title)} <span class="m">${t.kind==='daily'?'روزانه':t.kind==='weekly'?'هفتگی':'یک‌بار'} · ${fa(t.points)}</span></span><button class="s" onclick="delTask('${t.id}')">حذف</button></div>`).join('')}`;
+  },
+  async points(kid) {
+    const { data } = await sb.from('points_ledger').select('*').eq('kid_id', kid.id).order('created_at', { ascending: false }).limit(30);
+    const wk = new Date(Date.now() - 7 * 864e5).toISOString();
+    const week = (data || []).filter(r => r.created_at > wk && r.delta > 0).reduce((a, r) => a + r.delta, 0);
+    const bal = await balance(kid.id);
+    return `<div class="card"><div class="big">${fa(bal)}</div><div class="m">این هفته: +${fa(week)}</div>
+      <div class="row"><input id="md" type="number" placeholder="+۵ یا −۳"><input id="mn" placeholder="دلیل"><button onclick="manual()">ثبت</button></div>
+      <button class="g" style="margin-top:8px" onclick="closeMonth()">بستن ماه و تبدیل به پول</button></div>
+      ${(data || []).map(r => `<div class="card row"><span>${esc(r.note || r.reason)}</span><b style="flex:0;color:var(--${r.delta>0?'g':'r'})">${r.delta>0?'+':''}${fa(r.delta)}</b></div>`).join('')}`;
+  },
+  async wish(kid) {
+    const { data } = await sb.from('wishlist_progress').select('*').eq('kid_id', kid.id);
+    return `<div class="card"><b>آرزوی جدید</b><input id="wt" placeholder="نام"><input id="wu" placeholder="لینک (اختیاری)" dir="ltr">
+      <input id="wi" placeholder="لینک عکس (اختیاری)" dir="ltr"><input id="wp" type="number" placeholder="قیمت (تومان)">
+      <div class="row"><button class="s" onclick="lookup()">🔎 پیدا کردن قیمت و عکس</button><button onclick="addWish()">افزودن</button></div><div id="lk" class="m"></div></div>
+      ${(data || []).map(w => { const need = w.points_needed || 0, pc = need ? Math.min(100, (w.points / need) * 100) : 0;
+        return `<div class="card">${w.image_url ? `<img src="${esc(w.image_url)}" style="max-width:100%;max-height:140px;border-radius:8px">` : ''}
+        <b>${esc(w.title)}</b><div class="m">${fa(w.price_toman || 0)} تومان · ${fa(need)} امتیاز لازم</div>
+        <div class="bar"><i style="width:${pc}%"></i></div><div class="m">${w.points_left > 0 ? fa(w.points_left) + ' امتیاز مانده' : 'رسید! 🎉'}</div>
+        <div class="row" style="margin-top:6px"><button class="g" onclick="bought('${w.id}')">خریده شد</button><button class="s" onclick="dropWish('${w.id}')">حذف</button></div></div>`; }).join('')}`;
+  },
+  async dict(kid) {
+    const { data } = await sb.from('dictations').select('*').eq('kid_id', kid.id).order('created_at', { ascending: false }).limit(20);
+    const lbl = { review: 'منتظر تایید متن', ready: 'آماده برای دیکته', graded: 'نمره گرفت؛ منتظر تایید امتیاز', done: 'تمام شد' };
+    return `<div class="card"><b>دیکته‌ی جدید</b><div class="m">هر جمله در یک خط (۳ تا ۹ کلمه بهتر است)</div>
+      <input id="dt" placeholder="عنوان (مثلاً درس ۳)"><textarea id="dx" placeholder="آب و هوا&#10;امروز خیلی خوب است"></textarea>
+      <div class="row"><input id="dp" type="number" value="10" placeholder="امتیاز"><button onclick="addDict()">افزودن</button></div></div>
+      ${(data || []).map(d => `<div class="card"><b>${esc(d.title)}</b> <span class="m">· ${lbl[d.status]} · ${fa(d.points)} امتیاز${d.created_by === 'kid' ? ' · از عکس کتاب' : ''}</span>
+      ${d.status === 'review' ? `<div class="m">متن را با کتاب مقایسه و اصلاح کن (متن فارسی بدون اعراب ممکن است درست خوانده نشود):</div><textarea id="ph_${d.id}">${esc((d.phrases || []).join('\n'))}</textarea>
+        <div class="row"><button class="g" onclick="saveDict('${d.id}')">تایید و آماده</button><button class="r" onclick="delDict('${d.id}')">حذف</button></div>`
+      : d.status === 'ready' ? `<div class="m">${fa((d.phrases || []).length)} جمله</div><div class="row"><button class="s" onclick="delDict('${d.id}')">حذف</button></div>`
+      : `<div class="m">${d.ai_score != null ? `نمره: ${fa(d.ai_score)} از ۲۰ · ${esc(d.ai_feedback || '')}` : 'هوش مصنوعی نمره نداده؛ خودت ببین.'}</div>
+        ${d.status === 'graded' ? `<div class="m">امتیاز پیشنهادی: ${fa(d.points_awarded ?? d.points)}</div>` : ''}
+        <div class="row">${d.answer_photo_path ? `<button class="s" onclick="showPhoto('${d.answer_photo_path}')">عکس</button>` : ''}${d.status === 'graded' ? `<button class="g" onclick="approveDict('${d.id}')">تایید و امتیاز</button><button class="r" onclick="rejectDict('${d.id}')">دوباره بنویسد</button>` : ''}</div>`}</div>`).join('')}`;
+  },
+  async apps(kid) {
+    const [{ data: apps }, { data: rules }] = await Promise.all([sb.from('device_apps').select('*').order('label'), sb.from('app_rules').select('*').eq('kid_id', kid.id)]);
+    const by = Object.fromEntries((rules || []).map(r => [r.package_name, r]));
+    const seen = new Set(); const list = (apps || []).filter(a => !seen.has(a.package_name) && seen.add(a.package_name));
+    if (!list.length) return '<div class="card m">هنوز گوشی وصل نشده یا لیست برنامه‌ها نرسیده. از تنظیمات گوشی را وصل کن.</div>';
+    return `<div class="card m">برنامه‌ی تیک‌خورده برای ${esc(kid.name)} مجاز است؛ بقیه قفل‌اند.</div>` + list.map(a => { const r = by[a.package_name]; return `<div class="card">
+      <label><input type="checkbox" style="width:auto" ${r ? 'checked' : ''} onchange="toggleApp('${esc(a.package_name)}',this.checked)"> <b>${esc(a.label || a.package_name)}</b></label>
+      <div class="m" dir="ltr">${esc(a.package_name)}</div>
+      ${r ? `<div class="row"><select onchange="ruleSet('${r.id}',{category:this.value})">${['game','social','edu','other'].map(c => `<option value="${c}" ${r.category === c ? 'selected' : ''}>${{game:'بازی',social:'اجتماعی',edu:'آموزشی',other:'سایر'}[c]}</option>`).join('')}</select>
+      <input type="number" placeholder="سقف دقیقه/روز" value="${r.daily_limit_min ?? ''}" onchange="ruleSet('${r.id}',{daily_limit_min:this.value?+this.value:null})"></div>
+      <label class="m"><input type="checkbox" style="width:auto" ${r.lock_until_tasks_done ? 'checked' : ''} onchange="ruleSet('${r.id}',{lock_until_tasks_done:this.checked})"> تا تکالیف امروز انجام نشده قفل باشد</label>` : ''}</div>`; }).join('');
+  },
+  async set(kid) {
+    const { data: devs } = await sb.from('devices').select('*');
+    const { data: st } = await sb.from('settings').select('auto_approve_score,dictation_requires_review,dictation_points,dictation_daily_limit').single();
+    return `<div class="card"><b>ضریب تبدیل</b><div class="m">هر امتیاز چند تومان؟</div>
+      <div class="row"><input id="rt" type="number" value="${st.rate}"><button onclick="saveRate()">ذخیره</button></div></div>
+      <div class="card"><b>${esc(kid.name)}</b><div class="m">سقف روزانه (دقیقه)</div><input id="dl" type="number" value="${kid.daily_limit_min}">
+      <div class="m">اگر کمتر از این دقیقه گوشی دید، پاداش بگیرد</div><input id="bu" type="number" value="${kid.bonus_under_min ?? ''}">
+      <div class="m">امتیاز پاداش</div><input id="bp" type="number" value="${kid.bonus_points}">
+      <div class="m">رمز ۴ رقمی فرزند روی گوشی (خالی = بدون تغییر)</div><input id="kp" inputmode="numeric" maxlength="8" placeholder="${kid.pin_hash ? '••••' : 'تعیین نشده'}">
+      <button onclick="saveKid()">ذخیره</button></div>
+      <div class="card"><b>تایید خودکار تکلیف</b><div class="m">اگر نمره‌ی هوش مصنوعی (از ۲۰) حداقل این‌قدر بود، امتیاز خودکار داده شود. خالی = همیشه خودم تایید می‌کنم.</div>
+      <div class="row"><input id="aa" type="number" value="${st?.auto_approve_score ?? ''}"><button onclick="saveAuto()">ذخیره</button></div></div>
+      <div class="card"><b>دیکته</b>
+      <label class="m"><input type="checkbox" id="dr" style="width:auto" ${st?.dictation_requires_review === false ? '' : 'checked'}> متن عکس کتاب قبل از دیکته را من تایید کنم</label>
+      <div class="m">امتیاز پیش‌فرض هر دیکته</div><input id="dpt" type="number" value="${st?.dictation_points ?? 10}">
+      <div class="m">حداکثر دیکته‌ی نمره‌گرفته در روز برای هر فرزند</div><input id="dlm" type="number" value="${st?.dictation_daily_limit ?? 2}">
+      <button onclick="saveDictSettings()">ذخیره</button></div>
+      <div class="card"><b>گوشی‌ها</b>${(devs || []).map(d => `<div class="m">گوشی · آخرین ارتباط: ${d.last_seen ? new Date(d.last_seen).toLocaleString('fa-IR') : 'هنوز وصل نشده'}</div>`).join('')}
+      <button style="margin-top:6px" onclick="pairDevice()">افزودن گوشی (ساخت کد اتصال)</button>
+      <div class="row" style="margin-top:6px"><button class="r" onclick="cmd('lock_all')">قفل همه‌ی گوشی‌ها</button><button class="g" onclick="cmd('unlock')">بازکردن قفل</button><button class="s" onclick="cmd('extend',{minutes:15})">+۱۵ دقیقه</button></div></div>
+      <div class="card"><button class="s" onclick="sb.auth.signOut().then(boot)">خروج</button></div>`;
+  }
+};
+
+const val = id => $('#' + id).value.trim();
+async function addKid() { const n = prompt('نام فرزند؟'); if (n) { await sb.from('kids').insert({ name: n }); boot(); } }
+async function addTask() {
+  const wd = val('twd') ? val('twd').split(',').map(Number) : null;
+  if (!val('tt')) return;
+  await sb.from('tasks').insert({ kid_id: st.kid, title: val('tt'), kind: val('tk'), points: +val('tp') || 0, weekdays: wd, needs_photo: $('#tph').checked });
+  render();
+}
+async function delTask(id) { await sb.from('tasks').update({ active: false }).eq('id', id); render(); }
+async function approve(id) {
+  const { data: l } = await sb.from('task_logs').select('*, tasks(points,title)').eq('id', id).single();
+  if (l.status === 'approved') return;
+  const pts = l.points_awarded ?? l.tasks.points;
+  await sb.from('task_logs').update({ status: 'approved', points_awarded: pts }).eq('id', id);
+  if (pts) await sb.from('points_ledger').insert({ kid_id: l.kid_id, delta: pts, reason: 'task', ref_id: id, note: l.tasks.title });
+  render();
+}
+async function reject(id) {
+  const { data: l } = await sb.from('task_logs').select('*, tasks(title)').eq('id', id).single();
+  if (l.status === 'approved' && l.points_awarded) await sb.from('points_ledger').insert({ kid_id: l.kid_id, delta: -l.points_awarded, reason: 'penalty', ref_id: id, note: 'لغو: ' + l.tasks.title });
+  await sb.from('task_logs').update({ status: 'rejected', points_awarded: null }).eq('id', id); render();
+}
+async function showPhoto(path) {
+  const { data } = await sb.storage.from('homework').createSignedUrl(path, 300);
+  if (data?.signedUrl) window.open(data.signedUrl, '_blank');
+}
+async function manual() {
+  const d = +val('md'); if (!d) return;
+  await sb.from('points_ledger').insert({ kid_id: st.kid, delta: d, reason: d > 0 ? 'manual' : 'penalty', note: val('mn') || null });
+  render();
+}
+async function closeMonth() {
+  const bal = await balance(st.kid); if (bal <= 0) return alert('امتیازی نیست.');
+  if (!confirm(`${bal} امتیاز = ${bal * st.rate} تومان. ماه بسته شود و امتیاز صفر شود؟`)) return;
+  const month = today().slice(0, 7);
+  const { error } = await sb.from('month_closings').insert({ kid_id: st.kid, month, points_earned: bal, toman_per_point: st.rate, spent_on: prompt('جایزه چی خریده شد؟') });
+  if (error) return alert(error.message);
+  await sb.from('points_ledger').insert({ kid_id: st.kid, delta: -bal, reason: 'payout', note: 'بستن ماه ' + month });
+  render();
+}
+async function addWish() {
+  if (!val('wt')) return;
+  await sb.from('wishlist').insert({ kid_id: st.kid, title: val('wt'), source_url: val('wu') || null, image_url: val('wi') || null, price_toman: +val('wp') || null });
+  render();
+}
+async function lookup() {
+  const url = val('wu'), query = val('wt');
+  if (!url && !query) return alert('نام یا لینک را بنویس.');
+  $('#lk').textContent = 'در حال جست‌وجو…';
+  const { data: { session } } = await sb.auth.getSession();
+  const r = await fetch(SB_URL + '/functions/v1/fetch-price', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + session.access_token, apikey: SB_KEY }, body: JSON.stringify(url ? { url } : { query }) });
+  const j = await r.json();
+  if (!r.ok) { $('#lk').textContent = 'پیدا نشد: ' + (j.error || r.status); return; }
+  if (j.title && !val('wt')) $('#wt').value = j.title;
+  if (j.price_toman) $('#wp').value = j.price_toman;
+  if (j.image_url) $('#wi').value = j.image_url;
+  if (j.source_url && !val('wu')) $('#wu').value = j.source_url;
+  $('#lk').textContent = j.price_toman ? 'قیمت پیدا شد؛ قبل از افزودن بررسی کن.' : 'قیمت مطمئن پیدا نشد؛ دستی وارد کن.';
+}
+async function bought(id) { await sb.from('wishlist').update({ status: 'bought' }).eq('id', id); render(); }
+async function dropWish(id) { await sb.from('wishlist').update({ status: 'dropped' }).eq('id', id); render(); }
+async function saveRate() { st.rate = +val('rt') || 1000; await sb.from('settings').update({ toman_per_point: st.rate }).eq('id', 1); alert('ذخیره شد'); }
+async function saveKid() {
+  const u = { daily_limit_min: +val('dl') || 120, bonus_under_min: val('bu') ? +val('bu') : null, bonus_points: +val('bp') || 0 };
+  if (val('kp')) { if (!/^\d{4,8}$/.test(val('kp'))) return alert('رمز باید ۴ تا ۸ رقم باشد.'); u.pin_hash = await sha(val('kp')); }
+  await sb.from('kids').update(u).eq('id', st.kid);
+  boot();
+}
+async function addDict() {
+  const phrases = $('#dx').value.split('\n').map(x => x.trim()).filter(Boolean);
+  if (!phrases.length) return alert('حداقل یک جمله بنویس.');
+  await sb.from('dictations').insert({ kid_id: st.kid, title: val('dt') || 'دیکته', phrases, points: +val('dp') || 10, status: 'ready', created_by: 'parent' });
+  render();
+}
+async function saveDict(id) {
+  const phrases = $('#ph_' + id).value.split('\n').map(x => x.trim()).filter(Boolean);
+  if (!phrases.length) return alert('متن خالی است.');
+  await sb.from('dictations').update({ phrases, status: 'ready' }).eq('id', id); render();
+}
+async function delDict(id) { if (confirm('حذف شود؟')) { await sb.from('dictations').delete().eq('id', id); render(); } }
+async function approveDict(id) {
+  const { data: d } = await sb.from('dictations').select('*').eq('id', id).single();
+  if (d.status !== 'graded') return;
+  const pts = d.points_awarded ?? d.points;
+  await sb.from('dictations').update({ status: 'done', points_awarded: pts }).eq('id', id);
+  if (pts) await sb.from('points_ledger').insert({ kid_id: d.kid_id, delta: pts, reason: 'task', ref_id: id, note: 'دیکته: ' + d.title });
+  render();
+}
+async function rejectDict(id) {
+  await sb.from('dictations').update({ status: 'ready', done_day: null, ai_score: null, ai_feedback: null, points_awarded: null, answer_photo_path: null }).eq('id', id); render();
+}
+async function saveDictSettings() {
+  await sb.from('settings').update({ dictation_requires_review: $('#dr').checked, dictation_points: +val('dpt') || 10, dictation_daily_limit: +val('dlm') || 2 }).eq('id', 1);
+  alert('ذخیره شد');
+}
+async function saveAuto() { await sb.from('settings').update({ auto_approve_score: val('aa') ? +val('aa') : null }).eq('id', 1); alert('ذخیره شد'); }
+async function toggleApp(pkg, on) {
+  if (on) await sb.from('app_rules').upsert({ kid_id: st.kid, package_name: pkg, locked: false }, { onConflict: 'kid_id,package_name' });
+  else await sb.from('app_rules').delete().eq('kid_id', st.kid).eq('package_name', pkg);
+  render();
+}
+async function ruleSet(id, patch) { await sb.from('app_rules').update(patch).eq('id', id); }
+async function pairDevice() {
+  const a = new Uint8Array(18); crypto.getRandomValues(a);
+  const token = [...a].map(b => b.toString(36).padStart(2, '0')).join('').slice(0, 24).toUpperCase();
+  const { error } = await sb.from('devices').insert({ token_hash: await sha(token) });
+  if (error) return alert(error.message);
+  prompt('این کد را فقط یک‌بار می‌بینی. در اپ گوشی بچه‌ها وارد کن:', token);
+  render();
+}
+async function cmd(command, payload) {
+  const { data: devs } = await sb.from('devices').select('id');
+  if (!devs?.length) return alert('گوشی وصل نیست.');
+  await sb.from('device_commands').insert(devs.map(d => ({ device_id: d.id, command, payload: payload || null })));
+  alert('دستور فرستاده شد؛ حداکثر تا یک دقیقه‌ی دیگر روی گوشی اعمال می‌شود.');
+}
+boot();
+</script>
+</body>
+</html>

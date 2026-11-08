@@ -22,13 +22,49 @@ function isValidDay(day: unknown): day is string {
   return typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day) && !isNaN(Date.parse(day));
 }
 
-/** Which task templates need a log row on this day. "once" tasks get a row only if they have none yet. */
-function dueTasks<T extends Task>(tasks: T[], day: string, hasLogEver: Set<string>): T[] {
-  const wd = weekdayOf(day);
-  return tasks.filter(t =>
-    t.kind === 'daily' ||
-    (t.kind === 'weekly' && (t.weekdays ?? []).includes(wd)) ||
-    (t.kind === 'once' && !hasLogEver.has(t.id)));
+type Schedule = {
+  type?: 'daily' | 'weekdays' | 'monthly' | 'interval' | 'once';
+  weekdays?: number[]; month_day?: number; every_n?: number; date?: string;
+  start?: string | null; end?: string | null;
+} | null;
+
+function dayOfMonth(day: string): number { return Number(day.slice(8, 10)); }
+function lastDayOfMonth(day: string): number {
+  const y = Number(day.slice(0, 4)), m = Number(day.slice(5, 7));
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+function daysBetween(a: string, b: string): number {
+  return Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5);
+}
+
+/** Is this task due on `day`? Old tasks (no schedule) use kind/weekdays; new ones use the schedule. */
+function isDueOn(t: { kind: string; weekdays: number[] | null; schedule?: Schedule }, day: string, hasLogEver: boolean): boolean {
+  const s = t.schedule;
+  if (!s || !s.type) {
+    if (t.kind === 'daily') return true;
+    if (t.kind === 'weekly') return (t.weekdays ?? []).includes(weekdayOf(day));
+    if (t.kind === 'once') return !hasLogEver;
+    return false;
+  }
+  if (s.start && day < s.start) return false;
+  if (s.end && day > s.end) return false;
+  switch (s.type) {
+    case 'daily': return true;
+    case 'weekdays': return (s.weekdays ?? []).includes(weekdayOf(day));
+    case 'monthly': return dayOfMonth(day) === Math.min(s.month_day ?? 1, lastDayOfMonth(day));
+    case 'interval': {
+      if (!s.start) return false;
+      const diff = daysBetween(s.start, day);
+      return diff >= 0 && diff % Math.max(1, s.every_n ?? 1) === 0;
+    }
+    case 'once': return s.date === day && !hasLogEver;
+  }
+  return false;
+}
+
+/** Task templates that need a log row on this day. */
+function dueTasks<T extends { id: string; kind: string; weekdays: number[] | null; schedule?: Schedule }>(tasks: T[], day: string, hasLogEver: Set<string>): T[] {
+  return tasks.filter(t => isDueOn(t, day, hasLogEver.has(t.id)));
 }
 
 /** AI score is 0..20; points scale linearly with it. */
@@ -119,6 +155,48 @@ function findAudio(res: any): string | null {
   let found: string | null = null;
   for (const st of res?.steps ?? []) for (const c of st?.content ?? []) if (c?.type === 'audio' && typeof c.data === 'string') found = c.data;
   return found;
+}
+
+/** Calendar day in Iran (UTC+3:30) of an ISO timestamp. */
+function tehranDay(iso: string): string {
+  return new Date(Date.parse(iso) + 3.5 * 3600_000).toISOString().slice(0, 10);
+}
+
+/** The last n days ending at `day`, oldest first. */
+function lastDays(day: string, n = 7): string[] {
+  const out = [day];
+  for (let i = 1; i < n; i++) out.unshift(prevDay(out[0]));
+  return out;
+}
+
+/** Points EARNED (positive ledger rows) per day, aligned with `days`. */
+function weekPoints(rows: { delta: number; created_at: string }[], days: string[]): number[] {
+  const m = new Map(days.map(d => [d, 0]));
+  for (const r of rows) if (r.delta > 0) { const d = tehranDay(r.created_at); if (m.has(d)) m.set(d, m.get(d)! + r.delta); }
+  return days.map(d => m.get(d)!);
+}
+
+/** Kid/parent PINs are 4 to 8 digits. */
+function isValidPin(p: unknown): p is string {
+  return typeof p === 'string' && /^\d{4,8}$/.test(p);
+}
+
+/** AI-made drawing for the tutor's whiteboard. Only plain SVG shapes are allowed; anything risky -> null. */
+function cleanSvg(svg: unknown): string | null {
+  if (typeof svg !== 'string') return null;
+  const s = svg.trim().slice(0, 8000);
+  if (!/^<svg[\s>]/i.test(s) || !/<\/svg>$/i.test(s)) return null;
+  if (/<\s*(script|foreignobject|iframe|object|embed|image|use|style|link|meta|animate|set)\b/i.test(s)) return null;
+  if (/\son[a-z]+\s*=/i.test(s) || /javascript:|data:|https?:/i.test(s)) return null;
+  return s;
+}
+
+/** Key used for the automatic penalty of one unfinished task on one day (unique per kid). */
+function autoPenaltyNote(day: string, taskId: string): string { return `auto:${day}:${taskId}`; }
+
+/** Today's date in Iran (UTC+3:30, no DST). The server must never use UTC for a "day". */
+function tehranToday(now: Date = new Date()): string {
+  return new Date(now.getTime() + 3.5 * 3600_000).toISOString().slice(0, 10);
 }
 
 // ---- shared/common ----

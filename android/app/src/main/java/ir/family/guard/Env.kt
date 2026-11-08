@@ -13,16 +13,23 @@ object Env {
     )
 
     /** Packages that must never be blocked: launcher, dialer, keyboards, system UI. */
+    @Volatile private var essCache: Set<String>? = null
+    @Volatile private var essAt = 0L
+
     fun essential(ctx: Context): Set<String> {
+        val now = System.currentTimeMillis()
+        essCache?.let { if (now - essAt < 30_000) return it }
         val s = HashSet(SYSTEM)
         try {
             val home = ctx.packageManager.resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)
             home?.activityInfo?.packageName?.let { s.add(it) }
         } catch (e: Exception) {}
         try { (ctx.getSystemService(Context.TELECOM_SERVICE) as TelecomManager).defaultDialerPackage?.let { s.add(it) } } catch (e: Exception) {}
+        try { android.provider.Telephony.Sms.getDefaultSmsPackage(ctx)?.let { s.add(it) } } catch (e: Exception) {}
         try {
             (ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).enabledInputMethodList.forEach { s.add(it.packageName) }
         } catch (e: Exception) {}
+        essCache = s; essAt = now
         return s
     }
 
@@ -40,7 +47,7 @@ object Env {
     fun buildCtx(ctx: Context, p: Prefs, st: State?): Policy.Ctx {
         val day = Sync.today()
         val kid = st?.kids?.firstOrNull { it.id == p.activeKid }
-        val now = LocalTime.now()
+        val now = LocalTime.now(TEHRAN)
         return Policy.Ctx(
             ownPkg = ctx.packageName, essential = essential(ctx), protectedPkgs = ::isProtected, kid = kid,
             lockAll = p.lockAll, parentUnlocked = p.parentUnlocked, grace = p.inGrace,

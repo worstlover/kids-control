@@ -1,0 +1,12 @@
+{
+  "name": "پنل خانواده",
+  "short_name": "پنل خانواده",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F6F7FB",
+  "theme_color": "#7C4DFF",
+  "lang": "fa",
+  "dir": "rtl",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

@@ -171,6 +171,65 @@ create table if not exists dictations (
   created_at timestamptz default now()
 );
 
+alter table app_rules add column if not exists always_on boolean not null default false;   -- open even when locked / time is up / limit reached
+
+-- Private tutor, one profile per kid and subject
+create table if not exists tutor_profiles (
+  id uuid primary key default gen_random_uuid(),
+  kid_id uuid not null references kids on delete cascade,
+  subject text not null,
+  goal text,
+  level text,                 -- مبتدی / متوسط / پیشرفته, set by the first assessment
+  level_notes text,           -- strengths and weaknesses, updated after each check
+  created_at timestamptz default now(),
+  unique (kid_id, subject)
+);
+create table if not exists tutor_plans (
+  id uuid primary key default gen_random_uuid(),
+  kid_id uuid not null references kids on delete cascade,
+  subject text not null,
+  day date not null,
+  items jsonb not null,       -- [{title, type, minutes}]
+  unique (kid_id, subject, day)
+);
+create table if not exists tutor_exercises (
+  id uuid primary key default gen_random_uuid(),
+  kid_id uuid not null references kids on delete cascade,
+  subject text not null,
+  day date not null,
+  kind text not null check (kind in ('assessment','practice','explain')),
+  prompt jsonb not null,      -- what the kid sees
+  answer jsonb,               -- what the AI expects; never sent to the phone before checking
+  status text not null default 'open' check (status in ('open','checked')),
+  result jsonb,
+  created_at timestamptz default now()
+);
+
+-- Daily penalties: parent defines them once, taps "apply today" (at most once per day each)
+create table if not exists penalty_rules (
+  id uuid primary key default gen_random_uuid(),
+  kid_id uuid not null references kids on delete cascade,
+  title text not null,
+  points int not null check (points > 0),
+  active boolean not null default true
+);
+create table if not exists penalty_logs (
+  id uuid primary key default gen_random_uuid(),
+  rule_id uuid not null references penalty_rules on delete cascade,
+  kid_id uuid not null references kids on delete cascade,
+  day date not null,
+  points int not null,
+  created_at timestamptz default now(),
+  unique (rule_id, day)
+);
+
+-- Task schedule and penalty (v3)
+alter table tasks add column if not exists schedule jsonb;                 -- {type, weekdays, month_day, every_n, date, start, end}
+alter table tasks add column if not exists penalty_points int not null default 0;   -- taken if the task is not done (auto penalty on)
+alter table tasks add column if not exists due_time text;                  -- optional "HH:MM"
+alter table kids add column if not exists auto_penalty boolean not null default false;   -- automatic penalties on/off per kid
+create unique index if not exists one_auto_penalty on points_ledger (kid_id, note) where reason = 'penalty' and note like 'auto:%';
+
 -- Installed apps reported by the phone (parent picks which are allowed)
 create table if not exists device_apps (
   device_id uuid not null references devices on delete cascade,
@@ -178,6 +237,10 @@ create table if not exists device_apps (
   label text,
   primary key (device_id, package_name)
 );
+
+-- Daily penalty: one per kid per day, enforced by a partial unique index
+alter table kids add column if not exists daily_penalty int not null default 0;   -- points taken when yesterday's tasks were not all done
+create unique index if not exists one_penalty_per_day on points_ledger (kid_id, note) where reason = 'penalty' and note like 'penalty:%';
 
 -- One screen-time bonus per kid per day
 create unique index if not exists one_bonus_per_day on points_ledger (kid_id, note) where reason = 'screen_bonus';
@@ -193,7 +256,7 @@ do $$
 declare t text;
 begin
   foreach t in array array['settings','kids','tasks','task_logs','app_rules','usage_logs',
-    'points_ledger','wishlist','month_closings','devices','device_commands','device_apps','dictations']
+    'points_ledger','wishlist','month_closings','devices','device_commands','device_apps','dictations','tutor_profiles','tutor_plans','tutor_exercises','penalty_rules','penalty_logs']
   loop
     execute format('alter table %I enable row level security', t);
     execute format('drop policy if exists parent_all on %I', t);

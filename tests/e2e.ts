@@ -31,6 +31,8 @@ await rest('/usage_logs', 'POST', [{ kid_id: ali.id, day: '2026-11-06', package_
 await rest('/wishlist', 'POST', [{ kid_id: ali.id, title: 'لگو', price_toman: 100000 }]);
 await rest('/app_rules', 'POST', [{ kid_id: ali.id, package_name: 'com.game', category: 'game', daily_limit_min: 30 }]);
 await rest('/device_commands', 'POST', [{ device_id: dev.id, command: 'lock_all' }]);
+await rest('/points_ledger', 'POST', { kid_id: ali.id, delta: 7, reason: 'manual', created_at: '2026-11-05T10:00:00Z' });   // for the weekly chart
+await rest('/points_ledger', 'POST', { kid_id: ali.id, delta: -7, reason: 'penalty', created_at: '2026-11-05T11:00:00Z' });  // nets to 0 so balances below stay the same
 
 console.log('device-sync');
 assert.equal((await fn(8001, { token: 'nope-nope-nope-nope', day: DAY })).status, 401); ok('bad token -> 401');
@@ -43,6 +45,9 @@ assert.equal(A.balance, 10); ok('yesterday bonus granted (30 < 60 min)');
 assert.equal(A.wishlist[0].points_left, 90); ok('wishlist points_left = 100 - 10');
 assert.equal(A.rules[0].package_name, 'com.game'); assert.equal(s.body.toman_per_point, 1000); ok('rules + rate returned');
 assert.equal(s.body.kids.find((k: any) => k.id === sara.id).tasks.length, 0); ok('other kid has no tasks');
+assert.deepEqual(s.body.week_days, ['2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06', '2026-11-07']); ok('week_days: 7 days ending today');
+assert.equal(A.week_points.length, 7); assert.equal(A.week_points[4], 7); assert.equal(s.body.kids.find((k: any) => k.id === sara.id).week_points.every((x: number) => x === 0), true); ok('weekly points chart data (earned only, per day)');
+assert.equal(A.screen_min_today, 45); assert.equal(s.body.kids.find((k: any) => k.id === sara.id).screen_min_today, 0); ok('screen minutes today for the competition chart');
 assert.deepEqual(s.body.commands.map((c: any) => c.command), ['lock_all']); ok('pending command delivered');
 assert.equal((await rest(`/usage_logs?day=eq.${DAY}`)).length, 1); ok('usage stored, unknown kid ignored');
 assert.equal((await rest('/device_apps')).length, 2); ok('apps stored, malformed entry skipped');
@@ -128,6 +133,67 @@ assert.equal((await cr('BOOKPAGE')).status, 429); ok('max 5 book photos per kid 
 await rest('/settings?id=eq.1', 'PATCH', { dictation_requires_review: false });
 c = await cr('BOOKPAGE', { day: '2026-11-12' }); assert.equal(c.body.status, 'ready'); ok('with review turned off, the dictation is ready immediately');
 
+console.log('kid pin');
+const KP = 'http://127.0.0.1:8006/';
+const kp = async (body: any) => { const r = await fetch(KP, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json() }; };
+assert.equal((await kp({ token: 'nope-nope-nope-nope', kid_id: ali.id, new_pin: '2468' })).status, 401); ok('kid-pin: bad device token -> 401');
+assert.equal((await kp({ token: TOKEN, kid_id: ali.id, new_pin: '12' })).status, 400); assert.equal((await kp({ token: TOKEN, kid_id: ali.id, new_pin: 'abcd' })).status, 400); ok('kid-pin: too short / non-digit -> 400');
+assert.equal((await kp({ token: TOKEN, kid_id: '00000000-0000-0000-0000-000000000000', new_pin: '2468' })).status, 404); ok('kid-pin: unknown kid -> 404');
+assert.equal((await kp({ token: TOKEN, kid_id: ali.id, new_pin: '2468' })).status, 200); ok('kid-pin: first PIN set without old PIN');
+assert.equal((await rest(`/kids?id=eq.${ali.id}`))[0].pin_hash, await sha('2468')); ok('kid-pin: stored as SHA-256');
+assert.equal((await kp({ token: TOKEN, kid_id: ali.id, new_pin: '1357' })).status, 403); ok('kid-pin: change without old PIN -> 403');
+assert.equal((await kp({ token: TOKEN, kid_id: ali.id, old_pin: '0000', new_pin: '1357' })).status, 403); ok('kid-pin: wrong old PIN -> 403');
+assert.equal((await rest(`/kids?id=eq.${ali.id}`))[0].pin_hash, await sha('2468')); ok('kid-pin: failed attempts change nothing');
+assert.equal((await kp({ token: TOKEN, kid_id: ali.id, old_pin: '2468', new_pin: '1357' })).status, 200); ok('kid-pin: correct old PIN -> changed');
+assert.equal((await rest(`/kids?id=eq.${ali.id}`))[0].pin_hash, await sha('1357')); ok('kid-pin: new hash stored, old one gone');
+await rest(`/kids?id=eq.${ali.id}`, 'PATCH', { pin_hash: null }); ok('kid-pin: test cleanup (PIN cleared again)');
+
+console.log('always-available apps');
+await rest(`/app_rules?kid_id=eq.${ali.id}&package_name=eq.com.game`, 'PATCH', { always_on: true });
+const rA = (await fn(8001, { token: TOKEN, day: DAY })).body.kids.find((k: any) => k.id === ali.id).rules.find((x: any) => x.package_name === 'com.game');
+assert.equal(rA.always_on, true); ok('always-available flag is sent to the phone');
+await rest(`/app_rules?kid_id=eq.${ali.id}&package_name=eq.com.game`, 'PATCH', { always_on: false });
+
+console.log('tutor');
+const TU = 'http://127.0.0.1:8007/';
+const tuRaw = async (body: any) => { const r = await fetch(TU, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: TOKEN, day: DAY, ...body }) }); return { status: r.status, body: await r.json() }; };
+assert.equal((await fetch(TU, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: 'nope-nope-nope-nope', kid_id: ali.id, subject: 'english', action: 'profile' }) })).status, 401); ok('tutor: bad device token -> 401');
+assert.equal((await tuRaw({ kid_id: '00000000-0000-0000-0000-000000000000', subject: 'english', action: 'profile' })).status, 404); ok('tutor: unknown kid -> 404');
+assert.equal((await tuRaw({ kid_id: ali.id, subject: '', action: 'profile' })).status, 400); ok('tutor: empty subject -> 400');
+assert.equal((await tuRaw({ kid_id: ali.id, subject: 'english', action: 'nope' })).status, 400); ok('tutor: unknown action -> 400');
+let t = await tuRaw({ kid_id: ali.id, subject: 'English', action: 'profile', goal: 'زبان یاد بگیرم' });
+assert.equal(t.body.status, 'assess'); assert.equal(t.body.questions.length, 5); assert.ok(!('answers' in t.body)); ok('tutor: first visit -> level test with 5 questions, answers not sent');
+const EX = t.body.exercise_id;
+t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'profile' }); assert.equal(t.body.exercise_id, EX); ok('tutor: open level test is reused, not duplicated');
+const prof = (await rest(`/tutor_profiles?kid_id=eq.${ali.id}&subject=eq.english`))[0]; assert.equal(prof.goal, 'زبان یاد بگیرم'); ok('tutor: subject saved lower-cased, goal saved');
+t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'assess_submit', exercise_id: EX, answers: ['دو', 'چهار', 'شش', 'هشت', 'ده'] });
+assert.deepEqual([t.body.level, t.body.score], ['متوسط', 4]); ok('tutor: level test graded -> level متوسط saved');
+assert.equal((await tuRaw({ kid_id: ali.id, subject: 'english', action: 'assess_submit', exercise_id: EX, answers: [] })).status, 409); ok('tutor: level test cannot be submitted twice');
+t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'profile' }); assert.equal(t.body.status, 'ready'); assert.equal(t.body.level, 'متوسط'); ok('tutor: next visit -> ready with level');
+assert.equal((await tuRaw({ kid_id: ali.id, subject: 'math', action: 'plan' })).body.error, 'assess_first'); ok('tutor: no plan before the level is known');
+t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'plan' }); assert.equal(t.body.items.length, 2); const PLAN = JSON.stringify(t.body.items); ok('tutor: daily plan made (2 items)');
+t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'plan' }); assert.deepEqual(t.body.items.map((x: any) => x.title), JSON.parse(PLAN).map((x: any) => x.title)); ok('tutor: same plan returned for the same day');
+t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'practice', topic: 'تمرین جمع' }); assert.equal(t.body.questions.length, 5); const PX = t.body.exercise_id; ok('tutor: practice questions made');
+const bal0 = (await rest(`/kid_balance?kid_id=eq.${ali.id}`))[0].points;
+t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'check', exercise_id: PX, answers: ['p1a', 'x', 'p3a', 'p4a', 'p5a'] });
+assert.equal(t.body.score, 4); assert.equal(t.body.results.length, 5); assert.equal(t.body.results[1].correct_answer, 'p2a'); assert.equal(t.body.results[0].correct_answer, undefined); ok('tutor: check -> 4/5; correct answer shown only for wrong ones');
+assert.equal((await rest(`/kid_balance?kid_id=eq.${ali.id}`))[0].points, bal0 + 4); ok('tutor: practice score adds points (+4)');
+assert.equal((await tuRaw({ kid_id: ali.id, subject: 'english', action: 'check', exercise_id: PX, answers: ['p1a'] })).status, 409); ok('tutor: checked practice cannot be graded again (no point farming)');
+const lv = (await rest(`/tutor_profiles?kid_id=eq.${ali.id}&subject=eq.english`))[0]; assert.ok(lv.level_notes.includes('تفریق')); ok('tutor: teacher notes updated after checks');
+t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'explain', text: 'کسر چیست؟' });
+assert.equal(t.body.steps.length, 2); assert.ok(t.body.steps[0].board.startsWith('<svg')); assert.equal(t.body.steps[1].board, null); assert.ok(!/script|onclick/i.test(JSON.stringify(t.body))); ok('tutor: explanation in steps; unsafe drawing removed, safe one kept');
+const EXP = t.body.exercise_id;
+t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'explain_done', exercise_id: EXP, understood: false }); assert.equal(t.body.next, 'simpler'); ok('tutor: "not understood" asks for a simpler version');
+t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'explain', text: 'کسر چیست؟', simpler: true }); assert.equal(t.body.title, 'ساده'); ok('tutor: simpler explanation made');
+t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'explain_done', exercise_id: EXP, understood: true }); assert.equal(t.body.ok, true); ok('tutor: understood -> recorded');
+assert.equal((await tuRaw({ kid_id: ali.id, subject: 'english', action: 'explain' })).status, 400); ok('tutor: explain needs text or photo');
+
+console.log('penalties on the phone');
+const [prule] = await rest('/penalty_rules', 'POST', [{ kid_id: ali.id, title: 'تست جریمه', points: 2 }]);
+await rest('/penalty_logs', 'POST', [{ rule_id: prule.id, kid_id: ali.id, day: DAY, points: 2 }]);
+const pnl = (await fn(8001, { token: TOKEN, day: DAY })).body.kids.find((k: any) => k.id === ali.id).penalties;
+assert.ok(pnl.some((p: any) => p.title === 'تست جریمه' && p.points === 2)); ok("today's penalty is sent to the phone with its reason");
+
 // bonus is per real day: 11-07 had 45 min (<60) -> one bonus on 11-08, none repeated, none for a day without report
 const bonuses = async () => (await rest(`/points_ledger?reason=eq.screen_bonus&kid_id=eq.${ali.id}&order=note`)).map((x: any) => x.note);
 await fn(8001, { token: TOKEN, day: '2026-11-08' });
@@ -135,4 +201,22 @@ await fn(8001, { token: TOKEN, day: '2026-11-08' });
 assert.deepEqual(await bonuses(), ['bonus:2026-11-06', 'bonus:2026-11-07']); ok('next day: one new bonus for 45 min, repeat sync adds nothing');
 await fn(8001, { token: TOKEN, day: '2026-11-10' });
 assert.deepEqual(await bonuses(), ['bonus:2026-11-06', 'bonus:2026-11-07']); ok('day with no usage report -> no bonus');
+console.log('automatic penalty per task');
+const [ptask] = await rest('/tasks', 'POST', [{ kid_id: ali.id, title: 'تکلیف جریمه', kind: 'daily', points: 2, penalty_points: 4 }]);
+await rest(`/kids?id=eq.${ali.id}`, 'PATCH', { auto_penalty: true });
+await fn(8001, { token: TOKEN, day: '2026-11-07' });          // today's rows (incl. the new task)
+await fn(8001, { token: TOKEN, day: '2026-11-08' });          // charges unfinished tasks of 11-07
+const aRows = await rest(`/points_ledger?kid_id=eq.${ali.id}&note=eq.auto:2026-11-07:${ptask.id}`);
+assert.equal(aRows.length, 1); assert.equal(aRows[0].delta, -4); ok('auto penalty: unfinished task costs its own points (-4), once');
+await fn(8001, { token: TOKEN, day: '2026-11-08' });
+assert.equal((await rest(`/points_ledger?kid_id=eq.${ali.id}&note=eq.auto:2026-11-07:${ptask.id}`)).length, 1); ok('auto penalty: repeated sync does not charge again');
+const penNow = (await fn(8001, { token: TOKEN, day: '2026-11-08' })).body.kids.find((k: any) => k.id === ali.id).penalties;
+assert.ok(penNow.some((p: any) => p.title.includes('تکلیف جریمه') && p.points === 4)); ok("the kid's phone shows which task cost points");
+await rest(`/kids?id=eq.${ali.id}`, 'PATCH', { auto_penalty: false });
+await fn(8001, { token: TOKEN, day: '2026-11-09' });
+assert.equal((await rest(`/points_ledger?kid_id=eq.${ali.id}&note=eq.auto:2026-11-08:${ptask.id}`)).length, 0); ok('auto penalty switched off: nothing charged for 11-08');
+// cleanup so later balances stay as before
+await rest(`/points_ledger?kid_id=eq.${ali.id}&note=eq.auto:2026-11-07:${ptask.id}`, 'DELETE');
+await rest(`/tasks?id=eq.${ptask.id}`, 'PATCH', { active: false });
+await rest(`/kids?id=eq.${ali.id}`, 'PATCH', { auto_penalty: false });
 console.log(`\nALL ${n} CHECKS PASSED`);

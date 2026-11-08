@@ -1,5 +1,5 @@
 import { admin, authDevice, cors, json } from '../_shared/common.ts';
-import { bonusFor, dueTasks, isValidDay, prevDay } from '../_shared/logic.ts';
+import { bonusFor, dueTasks, isValidDay, lastDays, prevDay, weekPoints } from '../_shared/logic.ts';
 
 // deno-lint-ignore-file no-explicit-any
 Deno.serve(async (req) => {
@@ -29,7 +29,7 @@ Deno.serve(async (req) => {
   if (rows.length) await db.from('usage_logs').upsert(rows, { onConflict: 'kid_id,day,package_name' });
 
   // 2) installed apps (so the parent can choose which are allowed)
-  const apps = (Array.isArray(body.apps) ? body.apps : []).slice(0, 600)
+  const apps = (Array.isArray(body.apps) ? body.apps : []).slice(0, 1500)
     .filter((a: any) => typeof a?.package_name === 'string')
     .map((a: any) => ({ device_id: device.id, package_name: a.package_name, label: String(a.label ?? '').slice(0, 80) }));
   if (apps.length) await db.from('device_apps').upsert(apps, { onConflict: 'device_id,package_name' });
@@ -60,10 +60,26 @@ Deno.serve(async (req) => {
     if (pts > 0) await db.from('points_ledger').insert({ kid_id: k.id, delta: pts, reason: 'screen_bonus', note: `bonus:${y}` }); // 23505 on repeat is fine
   }
 
+  // 4b) automatic penalty: yesterday's unfinished tasks cost their penalty points, only for kids who turned it on.
+  //      The unique index on points_ledger(kid_id, note) makes repeated syncs harmless.
+  const { data: yLogs } = await db.from('task_logs').select('task_id,kid_id,status,tasks(penalty_points)').eq('due_date', y);
+  for (const log of yLogs ?? []) {
+    const k = (kids ?? []).find((x: any) => x.id === log.kid_id);
+    if (!k || !(k as any).auto_penalty) continue;
+    if (log.status !== 'pending' && log.status !== 'rejected') continue;
+    const pts = (log as any).tasks?.penalty_points ?? 0;
+    if (pts > 0) await db.from('points_ledger').insert({ kid_id: k.id, delta: -pts, reason: 'penalty', note: `auto:${y}:${log.task_id}` });
+  }
+
+  // penalties the kid should see: manual ones applied today, and yesterday's automatic one
+  const { data: manualToday } = await db.from('penalty_logs').select('kid_id,points,penalty_rules(title)').eq('day', day);
+  const { data: autoRows } = await db.from('points_ledger').select('kid_id,delta,note').eq('reason', 'penalty').like('note', `auto:${y}:%`);
+  const titleOf: Record<string, string> = Object.fromEntries((tasks ?? []).map((t: any) => [t.id, t.title]));
+
   // 5) state for the phone
   const [{ data: logs }, { data: ledger }, { data: rules }, { data: wish }, { data: st }, { data: cmds }, { data: ut }, { data: dicts }] = await Promise.all([
     db.from('task_logs').select('id,kid_id,status,ai_score,ai_feedback,points_awarded,tasks(title,points,needs_photo,subject)').eq('due_date', day),
-    db.from('points_ledger').select('kid_id,delta'),
+    db.from('points_ledger').select('kid_id,delta,created_at'),
     db.from('app_rules').select('*'),
     db.from('wishlist_progress').select('id,kid_id,title,image_url,price_toman,points_needed,points_left'),
     db.from('settings').select('*').single(),
@@ -78,12 +94,25 @@ Deno.serve(async (req) => {
   const usage: Record<string, Record<string, number>> = {};
   (ut ?? []).forEach((r: any) => { (usage[r.kid_id] ??= {})[r.package_name] = r.minutes; });
 
+  const days = lastDays(day, 7);
+  const screenMin = (kidId: string) => {
+    const edu = new Set((rules ?? []).filter((r: any) => r.kid_id === kidId && r.category === 'edu').map((r: any) => r.package_name));
+    return Object.entries(usage[kidId] ?? {}).filter(([pkg]) => !edu.has(pkg)).reduce((a, [, m]) => a + m, 0);
+  };
+
   return json({
     day,
+    week_days: days,
     toman_per_point: st?.toman_per_point ?? 1000,
     kids: (kids ?? []).map((k: any) => ({
       id: k.id, name: k.name, pin_hash: k.pin_hash, daily_limit_min: k.daily_limit_min,
       balance: bal[k.id] ?? 0,
+      week_points: weekPoints((ledger ?? []).filter((r: any) => r.kid_id === k.id), days),
+      screen_min_today: screenMin(k.id),
+      penalties: [
+        ...(manualToday ?? []).filter((r: any) => r.kid_id === k.id).map((r: any) => ({ title: r.penalty_rules?.title ?? 'جریمه', points: r.points })),
+        ...(autoRows ?? []).filter((r: any) => r.kid_id === k.id).map((r: any) => ({ title: 'کار ناتمام دیروز: ' + (titleOf[String(r.note).split(':')[2]] ?? ''), points: -r.delta })),
+      ],
       tasks: (logs ?? []).filter((l: any) => l.kid_id === k.id).map((l: any) => ({
         log_id: l.id, title: l.tasks.title, points: l.tasks.points, needs_photo: l.tasks.needs_photo,
         status: l.status, ai_score: l.ai_score, ai_feedback: l.ai_feedback, points_awarded: l.points_awarded,

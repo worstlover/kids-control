@@ -43,6 +43,10 @@ class Prefs(ctx: Context) {
         get() = sp.getLong("appsSentAt", 0)
         set(v) { sp.edit().putLong("appsSentAt", v).apply() }
 
+    /** Background picture chosen by the kid from the gallery ("" = default gradient). */
+    var bgPath: String
+        get() = sp.getString("bgPath", "") ?: ""
+        set(v) { sp.edit().putString("bgPath", v).apply() }
     val parentUnlocked get() = System.currentTimeMillis() < parentUntil
     val inGrace get() = System.currentTimeMillis() < graceUntil
     val configured get() = token.isNotEmpty() && sbUrl.isNotEmpty()

@@ -8,7 +8,7 @@ Deno.serve({ port: 4000, onListen() {} }, async (req) => {
       ? Response.json({ id: 'u1', email: 'p@x.ir' }) : Response.json({ msg: 'bad' }, { status: 401 });
   }
   if (u.pathname.startsWith('/functions/v1/')) {
-    const port = { 'fetch-price': 8003, 'device-sync': 8001, 'device-submit': 8002, 'dictation-create': 8004, 'dictation-audio': 8005 }[u.pathname.split('/')[3] as string];
+    const port = { 'fetch-price': 8003, 'device-sync': 8001, 'device-submit': 8002, 'dictation-create': 8004, 'dictation-audio': 8005, 'tutor': 8007 }[u.pathname.split('/')[3] as string];
     return fetch(`http://127.0.0.1:${port}/`, { method: req.method, headers: req.headers, body: await req.arrayBuffer() });
   }
   if (u.pathname.startsWith('/storage/v1/object/sign/')) return Response.json({ signedURL: '/object/sign/x?token=t' });
@@ -31,6 +31,21 @@ Deno.serve({ port: 4001, onListen() {} }, async (req) => {
   const parts = b.contents[0].parts;
   const img = parts.find((x: any) => x.inline_data);
   const text = parts.find((x: any) => x.text).text;
+  if (text.includes('[TUTOR_')) {
+    const reply = (o: unknown) => Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(o) }] } }] });
+    if (text.includes('[TUTOR_ASSESS]')) return reply({ questions: [{ q: '۱+۱؟', a: 'دو' }, { q: '۲+۲؟', a: 'چهار' }, { q: '۳+۳؟', a: 'شش' }, { q: '۴+۴؟', a: 'هشت' }, { q: '۵+۵؟', a: 'ده' }] });
+    if (text.includes('[TUTOR_GRADE_LEVEL]')) return reply({ level: text.includes('جواب بچه: دو') ? 'متوسط' : 'مبتدی', score: 4, notes: 'جمع ساده خوب است', feedback: 'آفرین!' });
+    if (text.includes('[TUTOR_PLAN]')) return reply({ items: [{ title: 'تمرین جمع', type: 'practice', minutes: 5 }, { title: 'توضیح کسر', type: 'explain', minutes: 7 }] });
+    if (text.includes('[TUTOR_PRACTICE]')) return reply({ questions: [1, 2, 3, 4, 5].map(i => ({ q: 'پرسش ' + i, a: 'p' + i + 'a' })) });
+    if (text.includes('[TUTOR_CHECK]')) return reply({ results: [{ correct: true, hint: '' }, { correct: false, hint: 'دوباره فکر کن' }, { correct: true, hint: '' }, { correct: true, hint: '' }, { correct: true, hint: '' }], notes: 'جمع خوب، تفریق ضعیف' });
+    if (text.includes('[TUTOR_EXPLAIN]')) {
+      if (text.includes('خیلی ساده‌تر')) return reply({ title: 'ساده', steps: [{ say: 'مثل یک پیتزا', board: '<svg viewBox="0 0 400 240"><circle cx="200" cy="120" r="80"/></svg>', ask: null }] });
+      return reply({ title: 'کسر', steps: [
+        { say: 'کسر یعنی یک چیز به چند قسمت مساوی.', board: '<svg viewBox="0 0 400 240"><circle cx="200" cy="120" r="80"/></svg>', ask: 'فهمیدی؟' },
+        { say: 'مثلا نصف یعنی دو قسمت، یکی برداشته شده.', board: '<svg viewBox="0 0 400 240"><script>alert(1)</script></svg>', ask: null }] });
+    }
+    return reply({});
+  }
   let out: string;
   if (img) {
     const m = atob(img.inline_data.data).slice(0, 8);

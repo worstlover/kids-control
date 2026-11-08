@@ -29,7 +29,7 @@ if (!token || !ref || !gemini) {
 }
 
 // verify_jwt=false: the kid's phone authenticates with its own device token, not a Supabase login
-const FUNCTIONS = { 'device-sync': false, 'device-submit': false, 'dictation-create': false, 'dictation-audio': false, 'fetch-price': true };
+const FUNCTIONS = { 'device-sync': false, 'device-submit': false, 'dictation-create': false, 'dictation-audio': false, 'kid-pin': false, 'tutor': false, 'fetch-price': true };
 
 async function call(method, url, body, form) {
   const res = await fetch(API + url, {

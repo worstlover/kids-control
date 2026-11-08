@@ -66,3 +66,56 @@ Deno.test('dictation helpers', () => {
   assertEquals(L.findAudio({ steps: [{ type: 'thought' }, { type: 'model_output', content: [{ type: 'text', text: 'x' }, { type: 'audio', data: 'QUJD' }] }] }), 'QUJD');
   assertEquals(L.findAudio({ steps: [] }), null);
 });
+
+Deno.test('week chart helpers', () => {
+  assertEquals(L.tehranDay('2026-11-07T20:29:00Z'), '2026-11-07');   // 23:59 in Tehran
+  assertEquals(L.tehranDay('2026-11-07T20:31:00Z'), '2026-11-08');   // 00:01 next day in Tehran
+  assertEquals(L.lastDays('2026-11-02', 4), ['2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02']);
+  const days = L.lastDays('2026-11-07');
+  assertEquals(days.length, 7); assertEquals(days[6], '2026-11-07'); assertEquals(days[0], '2026-11-01');
+  const rows = [
+    { delta: 5, created_at: '2026-11-07T08:00:00Z' }, { delta: 3, created_at: '2026-11-07T09:00:00Z' },
+    { delta: -4, created_at: '2026-11-07T10:00:00Z' },        // penalty: not "earned"
+    { delta: 7, created_at: '2026-11-05T10:00:00Z' }, { delta: 9, created_at: '2026-10-20T10:00:00Z' }, // outside window
+  ];
+  assertEquals(L.weekPoints(rows, days), [0, 0, 0, 0, 7, 0, 8]);
+});
+
+Deno.test('cleanSvg keeps plain drawings and rejects anything risky', () => {
+  assertEquals(L.cleanSvg('<svg viewBox="0 0 400 240"><circle cx="5" cy="5" r="2"/></svg>')?.startsWith('<svg'), true);
+  assertEquals(L.cleanSvg('<svg><script>alert(1)</script></svg>'), null);
+  assertEquals(L.cleanSvg('<svg><circle onclick="x()"/></svg>'), null);
+  assertEquals(L.cleanSvg('<svg><a href="javascript:alert(1)"/></svg>'), null);
+  assertEquals(L.cleanSvg('<svg><image href="https://evil.example/x.png"/></svg>'), null);
+  assertEquals(L.cleanSvg('<div>not svg</div>'), null);
+  assertEquals(L.cleanSvg('<svg><rect/>'), null);
+  assertEquals(L.cleanSvg(42), null);
+});
+
+Deno.test('schedules: weekdays, monthly, interval, date range, once', () => {
+  // 2026-11-07 is a Saturday (6)
+  assertEquals(L.isDueOn({ kind: 'daily', weekdays: null, schedule: { type: 'weekdays', weekdays: [6] } }, '2026-11-07', false), true);
+  assertEquals(L.isDueOn({ kind: 'daily', weekdays: null, schedule: { type: 'weekdays', weekdays: [1, 3] } }, '2026-11-07', false), false);
+  // monthly on the 31st: February falls back to the last day
+  assertEquals(L.isDueOn({ kind: 'daily', weekdays: null, schedule: { type: 'monthly', month_day: 31 } }, '2026-02-28', false), true);
+  assertEquals(L.isDueOn({ kind: 'daily', weekdays: null, schedule: { type: 'monthly', month_day: 15 } }, '2026-02-28', false), false);
+  // every 3 days from Nov 1
+  const iv = { kind: 'daily', weekdays: null, schedule: { type: 'interval' as const, every_n: 3, start: '2026-11-01' } };
+  assertEquals(['2026-11-01', '2026-11-04', '2026-11-07'].map(d => L.isDueOn(iv, d, false)), [true, true, true]);
+  assertEquals(['2026-11-02', '2026-11-05'].map(d => L.isDueOn(iv, d, false)), [false, false]);
+  assertEquals(L.isDueOn(iv, '2026-10-29', false), false);   // before start
+  // date range
+  const r = { kind: 'daily', weekdays: null, schedule: { type: 'daily' as const, start: '2026-11-05', end: '2026-11-06' } };
+  assertEquals([L.isDueOn(r, '2026-11-04', false), L.isDueOn(r, '2026-11-05', false), L.isDueOn(r, '2026-11-07', false)], [false, true, false]);
+  // once on a date, never again after it was logged
+  const o = { kind: 'once', weekdays: null, schedule: { type: 'once' as const, date: '2026-11-07' } };
+  assertEquals(L.isDueOn(o, '2026-11-07', false), true); assertEquals(L.isDueOn(o, '2026-11-07', true), false); assertEquals(L.isDueOn(o, '2026-11-08', false), false);
+  // old tasks without schedule still work
+  assertEquals(L.isDueOn({ kind: 'weekly', weekdays: [6], schedule: null }, '2026-11-07', false), true);
+  assertEquals(L.autoPenaltyNote('2026-11-07', 'abc'), 'auto:2026-11-07:abc');
+});
+
+Deno.test('tehranToday uses Iran time, not UTC', () => {
+  assertEquals(L.tehranToday(new Date('2026-11-07T20:00:00Z')), '2026-11-07');   // 23:30 in Tehran
+  assertEquals(L.tehranToday(new Date('2026-11-07T21:00:00Z')), '2026-11-08');   // 00:30 in Tehran, UTC still says the 7th
+});

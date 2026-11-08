@@ -22,13 +22,49 @@ function isValidDay(day: unknown): day is string {
   return typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day) && !isNaN(Date.parse(day));
 }
 
-/** Which task templates need a log row on this day. "once" tasks get a row only if they have none yet. */
-function dueTasks<T extends Task>(tasks: T[], day: string, hasLogEver: Set<string>): T[] {
-  const wd = weekdayOf(day);
-  return tasks.filter(t =>
-    t.kind === 'daily' ||
-    (t.kind === 'weekly' && (t.weekdays ?? []).includes(wd)) ||
-    (t.kind === 'once' && !hasLogEver.has(t.id)));
+type Schedule = {
+  type?: 'daily' | 'weekdays' | 'monthly' | 'interval' | 'once';
+  weekdays?: number[]; month_day?: number; every_n?: number; date?: string;
+  start?: string | null; end?: string | null;
+} | null;
+
+function dayOfMonth(day: string): number { return Number(day.slice(8, 10)); }
+function lastDayOfMonth(day: string): number {
+  const y = Number(day.slice(0, 4)), m = Number(day.slice(5, 7));
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+function daysBetween(a: string, b: string): number {
+  return Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5);
+}
+
+/** Is this task due on `day`? Old tasks (no schedule) use kind/weekdays; new ones use the schedule. */
+function isDueOn(t: { kind: string; weekdays: number[] | null; schedule?: Schedule }, day: string, hasLogEver: boolean): boolean {
+  const s = t.schedule;
+  if (!s || !s.type) {
+    if (t.kind === 'daily') return true;
+    if (t.kind === 'weekly') return (t.weekdays ?? []).includes(weekdayOf(day));
+    if (t.kind === 'once') return !hasLogEver;
+    return false;
+  }
+  if (s.start && day < s.start) return false;
+  if (s.end && day > s.end) return false;
+  switch (s.type) {
+    case 'daily': return true;
+    case 'weekdays': return (s.weekdays ?? []).includes(weekdayOf(day));
+    case 'monthly': return dayOfMonth(day) === Math.min(s.month_day ?? 1, lastDayOfMonth(day));
+    case 'interval': {
+      if (!s.start) return false;
+      const diff = daysBetween(s.start, day);
+      return diff >= 0 && diff % Math.max(1, s.every_n ?? 1) === 0;
+    }
+    case 'once': return s.date === day && !hasLogEver;
+  }
+  return false;
+}
+
+/** Task templates that need a log row on this day. */
+function dueTasks<T extends { id: string; kind: string; weekdays: number[] | null; schedule?: Schedule }>(tasks: T[], day: string, hasLogEver: Set<string>): T[] {
+  return tasks.filter(t => isDueOn(t, day, hasLogEver.has(t.id)));
 }
 
 /** AI score is 0..20; points scale linearly with it. */
@@ -121,6 +157,48 @@ function findAudio(res: any): string | null {
   return found;
 }
 
+/** Calendar day in Iran (UTC+3:30) of an ISO timestamp. */
+function tehranDay(iso: string): string {
+  return new Date(Date.parse(iso) + 3.5 * 3600_000).toISOString().slice(0, 10);
+}
+
+/** The last n days ending at `day`, oldest first. */
+function lastDays(day: string, n = 7): string[] {
+  const out = [day];
+  for (let i = 1; i < n; i++) out.unshift(prevDay(out[0]));
+  return out;
+}
+
+/** Points EARNED (positive ledger rows) per day, aligned with `days`. */
+function weekPoints(rows: { delta: number; created_at: string }[], days: string[]): number[] {
+  const m = new Map(days.map(d => [d, 0]));
+  for (const r of rows) if (r.delta > 0) { const d = tehranDay(r.created_at); if (m.has(d)) m.set(d, m.get(d)! + r.delta); }
+  return days.map(d => m.get(d)!);
+}
+
+/** Kid/parent PINs are 4 to 8 digits. */
+function isValidPin(p: unknown): p is string {
+  return typeof p === 'string' && /^\d{4,8}$/.test(p);
+}
+
+/** AI-made drawing for the tutor's whiteboard. Only plain SVG shapes are allowed; anything risky -> null. */
+function cleanSvg(svg: unknown): string | null {
+  if (typeof svg !== 'string') return null;
+  const s = svg.trim().slice(0, 8000);
+  if (!/^<svg[\s>]/i.test(s) || !/<\/svg>$/i.test(s)) return null;
+  if (/<\s*(script|foreignobject|iframe|object|embed|image|use|style|link|meta|animate|set)\b/i.test(s)) return null;
+  if (/\son[a-z]+\s*=/i.test(s) || /javascript:|data:|https?:/i.test(s)) return null;
+  return s;
+}
+
+/** Key used for the automatic penalty of one unfinished task on one day (unique per kid). */
+function autoPenaltyNote(day: string, taskId: string): string { return `auto:${day}:${taskId}`; }
+
+/** Today's date in Iran (UTC+3:30, no DST). The server must never use UTC for a "day". */
+function tehranToday(now: Date = new Date()): string {
+  return new Date(now.getTime() + 3.5 * 3600_000).toISOString().slice(0, 10);
+}
+
 // ---- shared/common ----
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -177,7 +255,7 @@ Deno.serve(async (req) => {
   if (rows.length) await db.from('usage_logs').upsert(rows, { onConflict: 'kid_id,day,package_name' });
 
   // 2) installed apps (so the parent can choose which are allowed)
-  const apps = (Array.isArray(body.apps) ? body.apps : []).slice(0, 600)
+  const apps = (Array.isArray(body.apps) ? body.apps : []).slice(0, 1500)
     .filter((a: any) => typeof a?.package_name === 'string')
     .map((a: any) => ({ device_id: device.id, package_name: a.package_name, label: String(a.label ?? '').slice(0, 80) }));
   if (apps.length) await db.from('device_apps').upsert(apps, { onConflict: 'device_id,package_name' });
@@ -208,10 +286,26 @@ Deno.serve(async (req) => {
     if (pts > 0) await db.from('points_ledger').insert({ kid_id: k.id, delta: pts, reason: 'screen_bonus', note: `bonus:${y}` }); // 23505 on repeat is fine
   }
 
+  // 4b) automatic penalty: yesterday's unfinished tasks cost their penalty points, only for kids who turned it on.
+  //      The unique index on points_ledger(kid_id, note) makes repeated syncs harmless.
+  const { data: yLogs } = await db.from('task_logs').select('task_id,kid_id,status,tasks(penalty_points)').eq('due_date', y);
+  for (const log of yLogs ?? []) {
+    const k = (kids ?? []).find((x: any) => x.id === log.kid_id);
+    if (!k || !(k as any).auto_penalty) continue;
+    if (log.status !== 'pending' && log.status !== 'rejected') continue;
+    const pts = (log as any).tasks?.penalty_points ?? 0;
+    if (pts > 0) await db.from('points_ledger').insert({ kid_id: k.id, delta: -pts, reason: 'penalty', note: `auto:${y}:${log.task_id}` });
+  }
+
+  // penalties the kid should see: manual ones applied today, and yesterday's automatic one
+  const { data: manualToday } = await db.from('penalty_logs').select('kid_id,points,penalty_rules(title)').eq('day', day);
+  const { data: autoRows } = await db.from('points_ledger').select('kid_id,delta,note').eq('reason', 'penalty').like('note', `auto:${y}:%`);
+  const titleOf: Record<string, string> = Object.fromEntries((tasks ?? []).map((t: any) => [t.id, t.title]));
+
   // 5) state for the phone
   const [{ data: logs }, { data: ledger }, { data: rules }, { data: wish }, { data: st }, { data: cmds }, { data: ut }, { data: dicts }] = await Promise.all([
     db.from('task_logs').select('id,kid_id,status,ai_score,ai_feedback,points_awarded,tasks(title,points,needs_photo,subject)').eq('due_date', day),
-    db.from('points_ledger').select('kid_id,delta'),
+    db.from('points_ledger').select('kid_id,delta,created_at'),
     db.from('app_rules').select('*'),
     db.from('wishlist_progress').select('id,kid_id,title,image_url,price_toman,points_needed,points_left'),
     db.from('settings').select('*').single(),
@@ -226,12 +320,25 @@ Deno.serve(async (req) => {
   const usage: Record<string, Record<string, number>> = {};
   (ut ?? []).forEach((r: any) => { (usage[r.kid_id] ??= {})[r.package_name] = r.minutes; });
 
+  const days = lastDays(day, 7);
+  const screenMin = (kidId: string) => {
+    const edu = new Set((rules ?? []).filter((r: any) => r.kid_id === kidId && r.category === 'edu').map((r: any) => r.package_name));
+    return Object.entries(usage[kidId] ?? {}).filter(([pkg]) => !edu.has(pkg)).reduce((a, [, m]) => a + m, 0);
+  };
+
   return json({
     day,
+    week_days: days,
     toman_per_point: st?.toman_per_point ?? 1000,
     kids: (kids ?? []).map((k: any) => ({
       id: k.id, name: k.name, pin_hash: k.pin_hash, daily_limit_min: k.daily_limit_min,
       balance: bal[k.id] ?? 0,
+      week_points: weekPoints((ledger ?? []).filter((r: any) => r.kid_id === k.id), days),
+      screen_min_today: screenMin(k.id),
+      penalties: [
+        ...(manualToday ?? []).filter((r: any) => r.kid_id === k.id).map((r: any) => ({ title: r.penalty_rules?.title ?? 'جریمه', points: r.points })),
+        ...(autoRows ?? []).filter((r: any) => r.kid_id === k.id).map((r: any) => ({ title: 'کار ناتمام دیروز: ' + (titleOf[String(r.note).split(':')[2]] ?? ''), points: -r.delta })),
+      ],
       tasks: (logs ?? []).filter((l: any) => l.kid_id === k.id).map((l: any) => ({
         log_id: l.id, title: l.tasks.title, points: l.tasks.points, needs_photo: l.tasks.needs_photo,
         status: l.status, ai_score: l.ai_score, ai_feedback: l.ai_feedback, points_awarded: l.points_awarded,

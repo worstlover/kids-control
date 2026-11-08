@@ -4,8 +4,8 @@ import ir.family.guard.Policy.Reason.*
 var n = 0
 fun check(name: String, cond: Boolean) { if (!cond) { println("FAIL: $name"); kotlin.system.exitProcess(1) }; println("  ✓ ${++n}. $name") }
 
-fun rule(pkg: String, cat: String = "other", limit: Int? = null, locked: Boolean = false, from: String? = null, to: String? = null, tasks: Boolean = false) =
-    Rule(pkg, locked, cat, limit, from, to, tasks)
+fun rule(pkg: String, cat: String = "other", limit: Int? = null, locked: Boolean = false, from: String? = null, to: String? = null, tasks: Boolean = false, always: Boolean = false) =
+    Rule(pkg, locked, cat, limit, from, to, tasks, always)
 fun task(status: String) = TaskItem("id", "t", 5, false, status, null, null)
 fun kid(rules: List<Rule>, tasks: List<TaskItem> = emptyList(), limit: Int = 60) = Kid("k", "علی", null, limit, 0, tasks, emptyList(), rules)
 fun ctx(kid: Kid?, usage: Map<String, Long> = emptyMap(), lockAll: Boolean = false, parent: Boolean = false, grace: Boolean = false, minute: Int = 12 * 60, extra: Int = 0) =
@@ -39,5 +39,15 @@ fun main() {
     val kn = kid(listOf(rule("game", from = "21:00:00", to = "06:30:00")))
     check("overnight window wraps midnight", d("game", ctx(kn, minute = 23 * 60)) == OK && d("game", ctx(kn, minute = 5 * 60)) == OK && d("game", ctx(kn, minute = 12 * 60)) == OUTSIDE_HOURS)
     check("toMinutes parsing", Policy.toMinutes("07:05:00") == 425 && Policy.toMinutes(null) == null && Policy.toMinutes("x") == null)
+    // always-available apps (calls, SMS): ignore every restriction, but never the parent-only settings
+    val ka = kid(listOf(rule("phone", locked = true, always = true), rule("sms", from = "16:00", to = "17:00", always = true), rule("game", "game", limit = 1)),
+        tasks = listOf(task("pending")), limit = 10)
+    check("always-on app works while the phone is locked", d("phone", ctx(ka, lockAll = true)) == OK)
+    check("always-on app works even if it is also locked by the rule", d("phone", ctx(ka)) == OK)
+    check("always-on app works outside its time window", d("sms", ctx(ka, minute = 3 * 60)) == OK)
+    check("always-on app works with pending tasks and an exhausted limit", d("sms", ctx(ka, usage = mapOf("game" to 60L * 60), minute = 10 * 60)) == OK)
+    check("always-on app time is not counted toward the limit", Policy.remainingMinutes(ka, ctx(ka, usage = mapOf("phone" to 50L * 60))) == 10)
+    check("parent-only settings stay blocked even if an app is always-on", d("com.android.settings", ctx(ka, lockAll = true)) == PARENT_ONLY)
+    check("other apps are still locked while the phone is locked", d("game", ctx(ka, lockAll = true)) == LOCKED_ALL)
     println("\nPOLICY: ALL $n CHECKS PASSED")
 }

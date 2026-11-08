@@ -3,7 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>پنل والدین</title>
+<meta name="theme-color" content="#7C4DFF">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>پنل خانواده</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<meta name="theme-color" content="#7C4DFF">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="پنل خانواده">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.min.js"></script>
 <style>
 :root{--bg:#f6f7fb;--c:#fff;--t:#1d2330;--m:#6b7385;--p:#4f46e5;--g:#16a34a;--r:#dc2626;--b:#e3e6ee}
@@ -18,20 +29,31 @@ input,select{width:100%;padding:8px;margin:4px 0;border:1px solid var(--b);borde
 .tabs{display:flex;gap:4px;overflow-x:auto}.tabs button{background:var(--c);color:var(--t);border:1px solid var(--b)}.tabs button.on{background:var(--p);color:#fff}
 .bar{height:8px;background:var(--b);border-radius:6px;overflow:hidden}.bar i{display:block;height:100%;background:var(--g)}
 .m{color:var(--m);font-size:13px}.big{font-size:28px;font-weight:bold}
+body{background:linear-gradient(180deg,#EDE7FF,#FFF0F7 60%,#F6F7FB);min-height:100vh;padding-bottom:48px}
+.card{box-shadow:0 6px 18px rgba(79,70,229,.08);border-radius:18px;border:0}
+button{border-radius:14px;padding:10px 14px;font-weight:600;transition:transform .08s}
+button:active{transform:scale(.97)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.chips button{padding:7px 12px;font-size:14px;border-radius:999px}
+input{border-radius:12px}
+.tabs{position:sticky;top:0;z-index:5;background:rgba(246,247,251,.92);backdrop-filter:blur(8px);padding:8px 12px;margin:0 -12px}
+.tabs button{border-radius:999px}
+.bar i{background:linear-gradient(90deg,#7C4DFF,#FF5C93)}
 </style>
 </head>
 <body>
 <div id="app"></div>
+<script>if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");</script>
 <script>
 // ===== تنظیمات: مقدار Supabase خودت را اینجا بگذار =====
-const SB_URL = 'https://sfmzprwmjtnbvxylvfim.supabase.co';
-const SB_KEY = 'sb_publishable_5KJd_xQf35GjhN5O_iM8gg_ehU_ZFYy';
+const SB_URL = 'https://YOUR-PROJECT.supabase.co';
+const SB_KEY = 'YOUR-ANON-KEY';
 // ========================================================
 const sb = supabase.createClient(SB_URL, SB_KEY);
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fa = n => Number(n).toLocaleString('fa-IR');
-const today = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tehran' }).format(new Date());
 const sha = async t => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)))].map(b => b.toString(16).padStart(2, '0')).join('');
 let st = { kids: [], kid: null, tab: 'today', rate: 1000 };
 
@@ -60,7 +82,7 @@ let rid = 0; // newest render wins (prevents a slow earlier render from overwrit
 async function render() {
   const my = ++rid;
   const kid = st.kids.find(k => k.id === st.kid);
-  const tabs = [['today','امروز'],['tasks','کارها'],['dict','دیکته'],['points','امتیاز'],['wish','آرزوها'],['apps','برنامه‌ها'],['set','تنظیمات']];
+  const tabs = [['today','امروز'],['tasks','کارها'],['dict','دیکته'],['usage','گزارش'],['points','امتیاز'],['wish','آرزوها'],['apps','برنامه‌ها'],['set','تنظیمات']];
   let h = `<div class="tabs">${st.kids.map(k => `<button class="${k.id===st.kid?'on':''}" onclick="st.kid='${k.id}';render()">${esc(k.name)}</button>`).join('')}
     <button class="s" onclick="addKid()">+ فرزند</button></div>`;
   if (!kid) { $('#app').innerHTML = h + '<div class="card">اول یک فرزند اضافه کن.</div>'; return; }
@@ -78,7 +100,7 @@ const balance = async id => {
 // تولید نوبت‌های امروز از قالب کارها
 async function ensureToday(kid) {
   const { data: ts } = await sb.from('tasks').select('*').eq('kid_id', kid.id).eq('active', true);
-  const wd = new Date().getDay();
+  const wd = new Date(today() + 'T12:00:00Z').getUTCDay();
   const due = (ts || []).filter(t => t.kind === 'daily' || (t.kind === 'weekly' && (t.weekdays || []).includes(wd)));
   if (due.length) await sb.from('task_logs').upsert(due.map(t => ({ task_id: t.id, kid_id: kid.id, due_date: today() })), { onConflict: 'task_id,due_date', ignoreDuplicates: true });
 }
@@ -97,15 +119,42 @@ const views = {
   },
   async tasks(kid) {
     const { data } = await sb.from('tasks').select('*').eq('kid_id', kid.id).eq('active', true);
-    return `<div class="card"><b>کار جدید</b><input id="tt" placeholder="عنوان (مثلاً دیکته)">
-      <div class="row"><select id="tk"><option value="daily">روزانه</option><option value="weekly">هفتگی</option><option value="once">یک‌بار</option></select>
-      <input id="tp" type="number" value="5" placeholder="امتیاز"></div>
-      <div class="m">برای هفتگی، روزها (۰=یکشنبه … ۶=شنبه) با ویرگول:</div><input id="twd" placeholder="مثلاً 1,3,5">
-      <label><input type="checkbox" id="tph" style="width:auto"> نیاز به عکس (نمره‌دهی هوش مصنوعی)</label><br>
-      <button onclick="addTask()">افزودن</button></div>
-      ${(data || []).map(t => `<div class="card row"><span>${esc(t.title)} <span class="m">${t.kind==='daily'?'روزانه':t.kind==='weekly'?'هفتگی':'یک‌بار'} · ${fa(t.points)}</span></span><button class="s" onclick="delTask('${t.id}')">حذف</button></div>`).join('')}`;
+    const e = st.editTask ? (data || []).find(t => t.id === st.editTask) : null;
+    const s = (e && e.schedule) || {};
+    const type = e ? (s.type || (e.kind === 'weekly' ? 'weekdays' : e.kind === 'once' ? 'once' : 'daily')) : 'daily';
+    const wds = (s.weekdays || (e && e.weekdays) || []).map(String);
+    const cur = { title: e?.title || '', points: e?.points ?? 5, penalty: e?.penalty_points ?? 0, time: e?.due_time || '', photo: !!e?.needs_photo,
+      start: s.start || '', end: s.end || '', monthDay: s.month_day || 1, every: s.every_n || 2, date: s.date || today() };
+    const types = [['daily', 'هر روز'], ['weekdays', 'روزهای هفته'], ['monthly', 'ماهانه'], ['interval', 'هر چند روز'], ['once', 'یک‌بار']];
+    const wdNames = ['یکشنبه', 'دوشنبه', 'سه‌شنبه', 'چهارشنبه', 'پنجشنبه', 'جمعه', 'شنبه'];
+    return `<div class="card">
+      <b>${e ? '✏️ ویرایش کار' : '➕ کار جدید'}</b>
+      <input id="tt" placeholder="عنوان کار، مثلاً تکالیف مدرسه" value="${esc(cur.title)}">
+      <div class="m" style="margin-top:8px">هر وقت انجام می‌شود:</div>
+      <div class="chips">${types.map(([k, l]) => `<button type="button" class="tt-btn ${k === type ? '' : 's'}" data-k="${k}" onclick="setTaskType('${k}')">${l}</button>`).join('')}</div>
+      <input type="hidden" id="tk" value="${type}">
+      <div class="tt-sec" id="tw-weekdays" style="display:${type === 'weekdays' ? 'block' : 'none'}">
+        <div class="chips">${wdNames.map((n, i) => `<button type="button" class="wd-btn ${wds.includes(String(i)) ? '' : 's'}" data-i="${i}" onclick="toggleWd(${i})">${n}</button>`).join('')}</div>
+        <input type="hidden" id="tweek" value="${wds.join(',')}">
+      </div>
+      <div class="tt-sec" id="tw-monthly" style="display:${type === 'monthly' ? 'block' : 'none'}">روز ماه <input id="tmd" type="number" min="1" max="31" value="${cur.monthDay}"> <span class="m">(اگر ماه روز کمتری داشت، آخرین روز ماه)</span></div>
+      <div class="tt-sec" id="tw-interval" style="display:${type === 'interval' ? 'block' : 'none'}">هر <input id="tev" type="number" min="2" value="${cur.every}"> روز یک‌بار</div>
+      <div class="tt-sec" id="tw-once" style="display:${type === 'once' ? 'block' : 'none'}">تاریخ: <input id="tdate" type="date" value="${cur.date}"></div>
+      <div class="row"><label class="m">از تاریخ<input id="tstart" type="date" value="${cur.start}"></label><label class="m">تا تاریخ (اختیاری)<input id="tend" type="date" value="${cur.end}"></label></div>
+      <div class="row"><label class="m">ساعت انجام (اختیاری)<input id="ttime" type="time" value="${cur.time}"></label></div>
+      <div class="row"><label class="m">امتیاز پاداش<input id="tp" type="number" min="0" value="${cur.points}"></label><label class="m">جریمه اگر انجام نشد<input id="tpen" type="number" min="0" value="${cur.penalty}"></label></div>
+      <label class="m"><input type="checkbox" id="tph" style="width:auto" ${cur.photo ? 'checked' : ''}> نیاز به عکس (نمره‌دهی هوش مصنوعی)</label>
+      <div class="row" style="margin-top:8px"><button onclick="saveTask()">${e ? 'ذخیره تغییرها' : 'افزودن کار'}</button>${e ? '<button class="s" onclick="cancelEdit()">انصراف</button>' : ''}</div>
+    </div>
+    ${(data || []).map(t => `<div class="card">
+      <div><b>${esc(t.title)}</b><div class="m">${taskWhen(t)}${t.due_time ? ' · تا ساعت ' + faStr(t.due_time) : ''} · ${fa(t.points)} امتیاز${t.penalty_points ? ' · جریمه ' + fa(t.penalty_points) : ''}</div></div>
+      <div class="row" style="margin-top:8px"><button class="s" onclick="editTask('${t.id}')">✏️ ویرایش</button><button class="s" onclick="delTask('${t.id}')">🗑 حذف</button></div>
+      ${st.kids.length > 1 ? `<div class="m" style="margin-top:8px">کپی به:</div><div class="chips">${st.kids.filter(k => k.id !== kid.id).map(k => `<button class="s" onclick="copyTask('${t.id}','${k.id}')">📋 ${esc(k.name)}</button>`).join('')}</div>` : ''}
+    </div>`).join('') || '<div class="card m">هنوز کاری نیست.</div>'}
+    ${st.kids.length > 1 && (data || []).length ? `<div class="card"><b>کپی همه‌ی کارها</b><div class="chips" style="margin-top:6px">${st.kids.filter(k => k.id !== kid.id).map(k => `<button onclick="copyAll('${k.id}')">همه به ${esc(k.name)}</button>`).join('')}</div></div>` : ''}`;
   },
   async points(kid) {
+    const { data: prules } = await sb.from('penalty_rules').select('*').eq('kid_id', kid.id).eq('active', true).order('title');
     const { data } = await sb.from('points_ledger').select('*').eq('kid_id', kid.id).order('created_at', { ascending: false }).limit(30);
     const wk = new Date(Date.now() - 7 * 864e5).toISOString();
     const week = (data || []).filter(r => r.created_at > wk && r.delta > 0).reduce((a, r) => a + r.delta, 0);
@@ -113,6 +162,9 @@ const views = {
     return `<div class="card"><div class="big">${fa(bal)}</div><div class="m">این هفته: +${fa(week)}</div>
       <div class="row"><input id="md" type="number" placeholder="+۵ یا −۳"><input id="mn" placeholder="دلیل"><button onclick="manual()">ثبت</button></div>
       <button class="g" style="margin-top:8px" onclick="closeMonth()">بستن ماه و تبدیل به پول</button></div>
+      <div class="card"><b>⚠ جریمه‌ی روزانه</b><div class="m">هر جریمه برای هر روز یک بار ثبت می‌شود. امتیاز از موجودی کم می‌شود.</div>
+        ${(prules || []).map(p => `<div class="row" style="margin-top:8px"><span style="flex:1">${esc(p.title)} <span class="m">−${fa(p.points)}</span></span><button class="r" onclick="applyPenalty('${p.id}')">ثبت امروز</button><button class="s" onclick="delPenalty('${p.id}')">حذف</button></div>`).join('') || '<div class="m" style="margin-top:6px">هنوز جریمه‌ای تعریف نشده.</div>'}
+        <div class="row" style="margin-top:8px"><input id="pt" placeholder="عنوان (مثلاً بی‌ادبی)"><input id="pp" type="number" placeholder="امتیاز"><button onclick="addPenalty()">افزودن</button></div></div>
       ${(data || []).map(r => `<div class="card row"><span>${esc(r.note || r.reason)}</span><b style="flex:0;color:var(--${r.delta>0?'g':'r'})">${r.delta>0?'+':''}${fa(r.delta)}</b></div>`).join('')}`;
   },
   async wish(kid) {
@@ -140,6 +192,43 @@ const views = {
         ${d.status === 'graded' ? `<div class="m">امتیاز پیشنهادی: ${fa(d.points_awarded ?? d.points)}</div>` : ''}
         <div class="row">${d.answer_photo_path ? `<button class="s" onclick="showPhoto('${d.answer_photo_path}')">عکس</button>` : ''}${d.status === 'graded' ? `<button class="g" onclick="approveDict('${d.id}')">تایید و امتیاز</button><button class="r" onclick="rejectDict('${d.id}')">دوباره بنویسد</button>` : ''}</div>`}</div>`).join('')}`;
   },
+  async usage(kid) {
+    const range = st.usageRange || 'today';
+    const days = range === 'today' ? [today()] : lastNDays(7);
+    const [{ data: rows }, { data: apps }, { data: rules }] = await Promise.all([
+      sb.from('usage_logs').select('day,package_name,minutes').eq('kid_id', kid.id).gte('day', days[0]).lte('day', days[days.length - 1]),
+      sb.from('device_apps').select('package_name,label'),
+      sb.from('app_rules').select('package_name,category').eq('kid_id', kid.id)]);
+    const label = {}; (apps || []).forEach(a => { label[a.package_name] = label[a.package_name] || a.label || a.package_name; });
+    const cat = {}; (rules || []).forEach(r => cat[r.package_name] = r.category);
+    const byApp = {}, byDay = {}; days.forEach(d => byDay[d] = 0);
+    let total = 0, edu = 0;
+    (rows || []).forEach(r => {
+      byApp[r.package_name] = (byApp[r.package_name] || 0) + r.minutes;
+      byDay[r.day] = (byDay[r.day] || 0) + r.minutes;
+      if (cat[r.package_name] === 'edu') edu += r.minutes; else total += r.minutes;
+    });
+    const list = Object.entries(byApp).sort((a, b) => b[1] - a[1]);
+    const max = Math.max(1, ...list.map(x => x[1]));
+    const dayMax = Math.max(1, ...Object.values(byDay));
+    const catName = { game: 'بازی', social: 'اجتماعی', edu: 'آموزشی', other: 'سایر' };
+    const catColor = { game: '#7C4DFF', social: '#FF5C93', edu: '#22C55E', other: '#9AA2B5' };
+    const dayLbl = ['ی', 'د', 'س', 'چ', 'پ', 'ج', 'ش'];
+    return `<div class="card">
+      <div class="row"><button class="${range === 'today' ? '' : 's'}" onclick="st.usageRange='today';render()">امروز</button><button class="${range === 'week' ? '' : 's'}" onclick="st.usageRange='week';render()">۷ روز گذشته</button></div>
+      <div class="big" style="margin-top:10px">${fmtMin(total)}</div>
+      <div class="m">زمان گوشی ${range === 'today' ? 'امروز' : 'در ۷ روز'} (بدون آموزشی)${edu ? ` · آموزشی: ${fmtMin(edu)}` : ''}</div>
+      ${range === 'today' ? `<div class="m">سقف روزانه: ${fmtMin(kid.daily_limit_min)}</div><div class="bar" style="margin-top:6px"><i style="width:${Math.min(100, total / Math.max(1, kid.daily_limit_min) * 100)}%"></i></div>` : ''}
+    </div>
+    ${range === 'week' ? `<div class="card"><b>هر روز چقدر؟</b>
+      <div style="display:flex;align-items:flex-end;gap:6px;height:140px;margin-top:10px">
+        ${days.map(d => { const v = byDay[d] || 0; const h = Math.max(v ? 6 : 2, v / dayMax * 120); return `<div style="flex:1;text-align:center"><div class="m">${v ? fa(v) : ''}</div><div style="height:${h}px;background:linear-gradient(#7C4DFF,#FF5C93);border-radius:8px;margin:3px 2px"></div><div class="m">${dayLbl[new Date(d + 'T12:00:00').getDay()]}</div></div>`; }).join('')}
+      </div></div>` : ''}
+    <div class="card"><b>برنامه‌ها</b>
+      ${list.map(([pkg, m]) => `<div style="margin-top:10px"><div class="row"><span style="flex:1"><b>${esc(label[pkg] || pkg)}</b> <span class="m">${cat[pkg] ? `· ${catName[cat[pkg]] || cat[pkg]}` : ''}</span></span><span>${fmtMin(m)}</span></div>
+        <div class="bar"><i style="width:${m / max * 100}%;background:${catColor[cat[pkg]] || '#7C4DFF'}"></i></div></div>`).join('') || '<div class="m" style="margin-top:8px">هنوز گزارشی نیامده. گوشی باید وصل و همگام باشد.</div>'}
+    </div>`;
+  },
   async apps(kid) {
     const [{ data: apps }, { data: rules }] = await Promise.all([sb.from('device_apps').select('*').order('label'), sb.from('app_rules').select('*').eq('kid_id', kid.id)]);
     const by = Object.fromEntries((rules || []).map(r => [r.package_name, r]));
@@ -150,7 +239,7 @@ const views = {
       <div class="m" dir="ltr">${esc(a.package_name)}</div>
       ${r ? `<div class="row"><select onchange="ruleSet('${r.id}',{category:this.value})">${['game','social','edu','other'].map(c => `<option value="${c}" ${r.category === c ? 'selected' : ''}>${{game:'بازی',social:'اجتماعی',edu:'آموزشی',other:'سایر'}[c]}</option>`).join('')}</select>
       <input type="number" placeholder="سقف دقیقه/روز" value="${r.daily_limit_min ?? ''}" onchange="ruleSet('${r.id}',{daily_limit_min:this.value?+this.value:null})"></div>
-      <label class="m"><input type="checkbox" style="width:auto" ${r.lock_until_tasks_done ? 'checked' : ''} onchange="ruleSet('${r.id}',{lock_until_tasks_done:this.checked})"> تا تکالیف امروز انجام نشده قفل باشد</label>` : ''}</div>`; }).join('');
+      <label class="m"><input type="checkbox" style="width:auto" ${r.lock_until_tasks_done ? 'checked' : ''} onchange="ruleSet('${r.id}',{lock_until_tasks_done:this.checked})"> تا تکالیف امروز انجام نشده قفل باشد</label><br><label class="m"><input type="checkbox" style="width:auto" ${r.always_on ? 'checked' : ''} onchange="ruleSet('${r.id}',{always_on:this.checked})"> همیشه در دسترس (حتی وقت قفل یا تمام شدن وقت)</label>` : ''}</div>`; }).join('');
   },
   async set(kid) {
     const { data: devs } = await sb.from('devices').select('*');
@@ -164,6 +253,7 @@ const views = {
       <button onclick="saveKid()">ذخیره</button></div>
       <div class="card"><b>تایید خودکار تکلیف</b><div class="m">اگر نمره‌ی هوش مصنوعی (از ۲۰) حداقل این‌قدر بود، امتیاز خودکار داده شود. خالی = همیشه خودم تایید می‌کنم.</div>
       <div class="row"><input id="aa" type="number" value="${st?.auto_approve_score ?? ''}"><button onclick="saveAuto()">ذخیره</button></div></div>
+      <div class="card"><b>جریمه‌ی خودکار</b><div class="m">اگر کاری که جریمه دارد دیروز انجام نشد، امتیاز جریمه‌ی همان کار کم می‌شود. جریمه‌ی هر کار را در تب «کارها» تعیین کن.</div><label><input type="checkbox" id="ap" style="width:auto" ${kid.auto_penalty ? 'checked' : ''}> فعال باشد</label></div>
       <div class="card"><b>دیکته</b>
       <label class="m"><input type="checkbox" id="dr" style="width:auto" ${st?.dictation_requires_review === false ? '' : 'checked'}> متن عکس کتاب قبل از دیکته را من تایید کنم</label>
       <div class="m">امتیاز پیش‌فرض هر دیکته</div><input id="dpt" type="number" value="${st?.dictation_points ?? 10}">
@@ -176,13 +266,71 @@ const views = {
   }
 };
 
+const lastNDays = n => { const out = [], base = new Date(today() + 'T12:00:00Z'); for (let i = n - 1; i >= 0; i--) { const x = new Date(base); x.setUTCDate(base.getUTCDate() - i); out.push(x.toISOString().slice(0, 10)); } return out; };
+const fmtMin = m => { const h = Math.floor(m / 60), r = m % 60; return h ? `${fa(h)} ساعت${r ? ' و ' + fa(r) + ' دقیقه' : ''}` : `${fa(r)} دقیقه`; };
 const val = id => $('#' + id).value.trim();
 async function addKid() { const n = prompt('نام فرزند؟'); if (n) { await sb.from('kids').insert({ name: n }); boot(); } }
-async function addTask() {
-  const wd = val('twd') ? val('twd').split(',').map(Number) : null;
-  if (!val('tt')) return;
-  await sb.from('tasks').insert({ kid_id: st.kid, title: val('tt'), kind: val('tk'), points: +val('tp') || 0, weekdays: wd, needs_photo: $('#tph').checked });
-  render();
+const DAYS_FA = ['یکشنبه', 'دوشنبه', 'سه‌شنبه', 'چهارشنبه', 'پنجشنبه', 'جمعه', 'شنبه'];
+const faStr = x => String(x).replace(/\d/g, d => '۰۱۲۳۴۵۶۷۸۹'[d]);
+function taskWhen(t) {
+  const s = t.schedule || {};
+  if (!s.type) return t.kind === 'daily' ? 'هر روز' : t.kind === 'weekly' ? (t.weekdays || []).map(i => DAYS_FA[i]).join('، ') : 'یک‌بار';
+  if (s.type === 'daily') return 'هر روز';
+  if (s.type === 'weekdays') return (s.weekdays || []).map(i => DAYS_FA[i]).join('، ');
+  if (s.type === 'monthly') return `روز ${faStr(s.month_day)} هر ماه`;
+  if (s.type === 'interval') return `هر ${faStr(s.every_n)} روز`;
+  if (s.type === 'once') return `یک‌بار در ${faStr(s.date)}`;
+  return '';
+}
+function setTaskType(k) {
+  $('#tk').value = k;
+  document.querySelectorAll('.tt-sec').forEach(el => el.style.display = 'none');
+  const sec = document.getElementById('tw-' + k); if (sec) sec.style.display = 'block';
+  document.querySelectorAll('.tt-btn').forEach(b => b.className = b.dataset.k === k ? 'tt-btn' : 'tt-btn s');
+}
+function toggleWd(i) {
+  const cur = val('tweek').split(',').filter(Boolean);
+  const x = String(i);
+  const next = cur.includes(x) ? cur.filter(v => v !== x) : [...cur, x].sort();
+  $('#tweek').value = next.join(',');
+  document.querySelectorAll('.wd-btn').forEach(b => b.className = next.includes(b.dataset.i) ? 'wd-btn' : 'wd-btn s');
+}
+function editTask(id) { st.editTask = id; st.tab = 'tasks'; render(); }
+function cancelEdit() { st.editTask = null; render(); }
+async function saveTask() {
+  const title = val('tt');
+  if (!title) return alert('عنوان کار را بنویس.');
+  const type = val('tk');
+  const sched = { type };
+  if (type === 'weekdays') { sched.weekdays = val('tweek').split(',').filter(Boolean).map(Number); if (!sched.weekdays.length) return alert('حداقل یک روز هفته را انتخاب کن.'); }
+  if (type === 'monthly') { sched.month_day = +val('tmd'); if (!(sched.month_day >= 1 && sched.month_day <= 31)) return alert('روز ماه باید بین ۱ تا ۳۱ باشد.'); }
+  if (type === 'interval') { sched.every_n = +val('tev'); if (!(sched.every_n >= 2)) return alert('عدد بزرگ‌تر از ۱ بنویس.'); }
+  if (type === 'once') { sched.date = val('tdate'); if (!sched.date) return alert('تاریخ را انتخاب کن.'); }
+  sched.start = val('tstart') || (type === 'interval' ? today() : null);
+  sched.end = val('tend') || null;
+  if (type === 'once') { sched.start = null; sched.end = null; }
+  const kind = type === 'weekdays' ? 'weekly' : type === 'once' ? 'once' : 'daily';
+  const row = { title, kind, schedule: sched, weekdays: type === 'weekdays' ? sched.weekdays : null,
+    points: Math.max(0, +val('tp') || 0), penalty_points: Math.max(0, +val('tpen') || 0), due_time: val('ttime') || null,
+    needs_photo: $('#tph').checked, active: true };
+  const res = st.editTask ? await sb.from('tasks').update(row).eq('id', st.editTask) : await sb.from('tasks').insert({ ...row, kid_id: st.kid });
+  if (res.error) return alert('ذخیره نشد: ' + res.error.message);
+  st.editTask = null; render();
+}
+async function copyTask(id, toKid) {
+  const { data: t } = await sb.from('tasks').select('*').eq('id', id).single();
+  const { id: _a, created_at: _b, kid_id: _c, ...rest } = t;
+  const { error } = await sb.from('tasks').insert({ ...rest, kid_id: toKid });
+  if (error) return alert('کپی نشد: ' + error.message);
+  alert('کپی شد ✓'); render();
+}
+async function copyAll(toKid) {
+  const { data: ts } = await sb.from('tasks').select('*').eq('kid_id', st.kid).eq('active', true);
+  if (!ts || !ts.length) return;
+  const rows = ts.map(({ id, created_at, kid_id, ...rest }) => ({ ...rest, kid_id: toKid }));
+  const { error } = await sb.from('tasks').insert(rows);
+  if (error) return alert('کپی نشد: ' + error.message);
+  alert(`${fa(rows.length)} کار کپی شد ✓`); render();
 }
 async function delTask(id) { await sb.from('tasks').update({ active: false }).eq('id', id); render(); }
 async function approve(id) {
@@ -202,6 +350,19 @@ async function showPhoto(path) {
   const { data } = await sb.storage.from('homework').createSignedUrl(path, 300);
   if (data?.signedUrl) window.open(data.signedUrl, '_blank');
 }
+async function addPenalty() {
+  if (!val('pt') || !(+val('pp') > 0)) return alert('عنوان و امتیاز مثبت بنویس.');
+  await sb.from('penalty_rules').insert({ kid_id: st.kid, title: val('pt'), points: +val('pp') });
+  render();
+}
+async function applyPenalty(id) {
+  const { data: rule } = await sb.from('penalty_rules').select('*').eq('id', id).single();
+  const { error } = await sb.from('penalty_logs').insert({ rule_id: id, kid_id: rule.kid_id, day: today(), points: rule.points });
+  if (error) return alert(error.code === '23505' ? 'این جریمه برای امروز قبلاً ثبت شده.' : error.message);
+  await sb.from('points_ledger').insert({ kid_id: rule.kid_id, delta: -rule.points, reason: 'penalty', note: 'جریمه: ' + rule.title });
+  render();
+}
+async function delPenalty(id) { await sb.from('penalty_rules').update({ active: false }).eq('id', id); render(); }
 async function manual() {
   const d = +val('md'); if (!d) return;
   await sb.from('points_ledger').insert({ kid_id: st.kid, delta: d, reason: d > 0 ? 'manual' : 'penalty', note: val('mn') || null });
@@ -239,7 +400,7 @@ async function bought(id) { await sb.from('wishlist').update({ status: 'bought' 
 async function dropWish(id) { await sb.from('wishlist').update({ status: 'dropped' }).eq('id', id); render(); }
 async function saveRate() { st.rate = +val('rt') || 1000; await sb.from('settings').update({ toman_per_point: st.rate }).eq('id', 1); alert('ذخیره شد'); }
 async function saveKid() {
-  const u = { daily_limit_min: +val('dl') || 120, bonus_under_min: val('bu') ? +val('bu') : null, bonus_points: +val('bp') || 0 };
+  const u = { daily_limit_min: +val('dl') || 120, bonus_under_min: val('bu') ? +val('bu') : null, bonus_points: +val('bp') || 0, auto_penalty: !!$('#ap')?.checked };
   if (val('kp')) { if (!/^\d{4,8}$/.test(val('kp'))) return alert('رمز باید ۴ تا ۸ رقم باشد.'); u.pin_hash = await sha(val('kp')); }
   await sb.from('kids').update(u).eq('id', st.kid);
   boot();
@@ -292,6 +453,7 @@ async function cmd(command, payload) {
   await sb.from('device_commands').insert(devs.map(d => ({ device_id: d.id, command, payload: payload || null })));
   alert('دستور فرستاده شد؛ حداکثر تا یک دقیقه‌ی دیگر روی گوشی اعمال می‌شود.');
 }
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 boot();
 </script>
 </body>

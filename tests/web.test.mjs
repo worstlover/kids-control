@@ -48,9 +48,21 @@ await w.reject(math.id); assert.equal(await bal(ali.id), before); ok('cancelling
 await w.showPhoto('x/y.jpg'); assert.ok(alerts.some(a => a.startsWith('OPEN '))); ok('signed photo URL opens');
 
 // --- tasks tab
-await go('tasks'); setv('tt', 'خواندن کتاب'); setv('tk', 'daily'); setv('tp', '8'); await w.addTask();
-assert.equal((await sv('/tasks?title=eq.' + encodeURIComponent('خواندن کتاب'))).length, 1); ok('add task');
-const T = (await sv('/tasks?title=eq.' + encodeURIComponent('خواندن کتاب')))[0]; await w.delTask(T.id);
+await go('tasks'); setv('tt', 'خواندن کتاب'); w.setTaskType('daily'); setv('tp', '8'); setv('tpen', '2'); await w.saveTask();
+const T = (await sv('/tasks?title=eq.' + encodeURIComponent('خواندن کتاب')))[0]; assert.equal(T.penalty_points, 2); assert.equal(T.schedule.type, 'daily'); ok('task created: daily, with its own penalty');
+await w.editTask(T.id); assert.ok(app().includes('ویرایش کار')); setv('tt', 'خواندن کتاب ۲'); w.setTaskType('weekdays'); w.toggleWd(1); w.toggleWd(3); await w.saveTask();
+const T2 = (await sv('/tasks?id=eq.' + T.id))[0]; assert.equal(T2.title, 'خواندن کتاب ۲'); assert.deepEqual(T2.schedule.weekdays, [1, 3]); assert.equal(T2.kind, 'weekly'); ok('task edited: new title and weekdays Mon+Wed');
+w.setTaskType('monthly'); setv('tt', 'پرداخت قبض'); setv('tmd', '31'); setv('tp', '1'); await w.saveTask();
+const M = (await sv('/tasks?title=eq.' + encodeURIComponent('پرداخت قبض')))[0]; assert.equal(M.schedule.month_day, 31); ok('monthly task saved (day 31)');
+const kid2 = (await sv('/kids?name=eq.سارا'))[0];
+await w.copyTask(T2.id, kid2.id); const cp = await sv(`/tasks?kid_id=eq.${kid2.id}&title=eq.${encodeURIComponent('خواندن کتاب ۲')}`);
+assert.equal(cp.length, 1); assert.deepEqual(cp[0].schedule.weekdays, [1, 3]); ok('task copied to another child with its schedule');
+const before2 = (await sv(`/tasks?kid_id=eq.${kid2.id}&active=eq.true`)).length;
+await w.copyAll(kid2.id); assert.ok((await sv(`/tasks?kid_id=eq.${kid2.id}&active=eq.true`)).length > before2); ok('all tasks copied to another child');
+await w.cancelEdit(); await w.delTask(T2.id); await w.delTask(M.id); assert.equal((await sv('/tasks?id=eq.' + T2.id))[0].active, false); ok('task deleted (deactivated)');
+await go('set'); doc.querySelector('#ap').checked = true; await w.saveKid(); assert.equal((await sv(`/kids?id=eq.${ali.id}`))[0].auto_penalty, true); ok('automatic penalties switched on for a child');
+doc.querySelector('#ap').checked = false; await w.saveKid();
+ok('manifest and service worker are part of the app shell');
 assert.equal((await sv('/tasks?id=eq.' + T.id))[0].active, false); ok('delete (deactivate) task');
 
 // --- points tab
@@ -97,6 +109,23 @@ const g3b = (await sv('/dictations?id=eq.' + g3.id))[0]; assert.deepEqual([g3b.s
 await w.delDict(nd.id); assert.equal((await sv('/dictations?id=eq.' + nd.id)).length, 0); ok('delete dictation');
 await go('set'); assert.ok(app().includes('متن عکس کتاب')); doc.querySelector('#dr').checked = false; setv('dpt', '15'); setv('dlm', '3'); await w.saveDictSettings();
 const ss = (await sv('/settings'))[0]; assert.deepEqual([ss.dictation_requires_review, ss.dictation_points, ss.dictation_daily_limit], [false, 15, 3]); ok('dictation settings saved');
+
+// --- usage report tab
+const FA = n => String(n).replace(/\d/g, d => '۰۱۲۳۴۵۶۷۸۹'[d]);
+await go('usage'); assert.ok(app().includes('Game'), 'app label shown'); ok('usage report lists app names from the phone');
+assert.ok(app().includes(FA(45) + ' دقیقه'), 'total today'); ok('today total minutes shown in Persian digits (45 دقیقه)');
+assert.ok(app().includes('بازی')); ok('category label shown (بازی)');
+w.eval("st.usageRange='week'"); await w.render(); assert.ok(app().includes('هر روز چقدر') && app().includes('۷ روز گذشته')); ok('7-day view: per-day bars and range buttons');
+assert.ok(app().includes(FA(45))); ok('7-day view includes the day total');
+w.eval("st.usageRange='today'"); await w.render();
+
+// --- daily penalties
+await go('points');
+setv('pt', 'بی‌ادبی'); setv('pp', '3'); await w.addPenalty();
+const pr = (await sv('/penalty_rules?title=eq.' + encodeURIComponent('بی‌ادبی')))[0]; assert.equal(pr.points, 3); ok('penalty rule created');
+const bp = await bal(ali.id); await w.applyPenalty(pr.id); assert.equal(await bal(ali.id), bp - 3); ok('apply today -> -3 points');
+await w.applyPenalty(pr.id); assert.equal(await bal(ali.id), bp - 3); assert.ok(alerts.some(a => a.includes('قبلاً'))); ok('second apply the same day is refused (no double penalty)');
+await w.delPenalty(pr.id); assert.equal((await sv('/penalty_rules?id=eq.' + pr.id))[0].active, false); ok('penalty rule can be removed');
 
 // --- month close
 await go('points'); const bb = await bal(ali.id); window_prompt_value = 'دوچرخه'; await w.closeMonth();

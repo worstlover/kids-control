@@ -5,7 +5,7 @@ import org.json.JSONObject
 
 // No Android classes here, so it can be tested on a plain JVM against real server responses.
 
-class State(val day: String, val tomanPerPoint: Double, val kids: List<Kid>)
+class State(val day: String, val tomanPerPoint: Double, val kids: List<Kid>, val weekDays: List<String> = emptyList())
 
 private fun JSONObject.str(k: String): String? = if (isNull(k)) null else getString(k)
 private fun JSONObject.intOrNull(k: String): Int? = if (isNull(k)) null else getInt(k)
@@ -27,14 +27,17 @@ object StateParser {
                 k.optJSONArray("wishlist").mapObjs { w -> WishItem(w.getString("title"), w.longOrNull("price_toman"), w.longOrNull("points_needed"), w.longOrNull("points_left")) },
                 k.optJSONArray("rules").mapObjs { r ->
                     Rule(r.getString("package_name"), r.optBoolean("locked", false), r.optString("category", "other"), r.intOrNull("daily_limit_min"),
-                        r.str("allowed_from"), r.str("allowed_to"), r.optBoolean("lock_until_tasks_done", false))
+                        r.str("allowed_from"), r.str("allowed_to"), r.optBoolean("lock_until_tasks_done", false), r.optBoolean("always_on", false))
                 },
                 k.optJSONArray("dictations").mapObjs { d ->
                     DictItem(d.getString("id"), d.getString("title"), d.getString("status"), d.optInt("points", 0), d.optInt("phrase_count", 0),
                         d.dblOrNull("ai_score"), d.str("ai_feedback"), d.intOrNull("points_awarded"))
                 },
+                k.optJSONArray("week_points")?.let { a -> (0 until a.length()).map { a.getInt(it) } } ?: emptyList(),
+                k.optInt("screen_min_today", 0),
+                k.optJSONArray("penalties").mapObjs { p -> PenaltyItem(p.getString("title"), p.optInt("points", 0)) },
             )
-        })
+        }, o.optJSONArray("week_days")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList())
     } catch (e: Exception) { null }
 
 }

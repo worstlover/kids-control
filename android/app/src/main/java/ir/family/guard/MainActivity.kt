@@ -44,6 +44,8 @@ class MainActivity : Activity() {
     internal var tutorView: (() -> Unit)? = null
     internal lateinit var speaker: Speaker
     internal lateinit var scroll: ScrollView
+    private lateinit var nav: LinearLayout
+    private var homeTab = "home"             // home | learn | apps | score | more
     private var pendingId: String? = null
     private var pendingKind = "task"          // task | book | dict
     private var photoUri: Uri? = null
@@ -60,8 +62,17 @@ class MainActivity : Activity() {
         box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(40)); layoutDirection = View.LAYOUT_DIRECTION_RTL }
         sv.addView(box)
         scroll = sv
+        nav = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; setBackgroundColor(Color.WHITE); elevation = ui.dpf(10f)
+            layoutDirection = View.LAYOUT_DIRECTION_RTL; setPadding(ui.dp(4), ui.dp(6), ui.dp(4), ui.dp(6)); visibility = View.GONE
+        }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(sv, LinearLayout.LayoutParams(-1, 0, 1f))
+            addView(nav, LinearLayout.LayoutParams(-1, -2))
+        }
         applyBackground()
-        setContentView(sv)
+        setContentView(root)
     }
 
     override fun onResume() { super.onResume(); render(); refresh() }
@@ -115,6 +126,7 @@ class MainActivity : Activity() {
     internal fun render() {
         applyBackground()
         box.removeAllViews()
+        nav.visibility = View.GONE
         if (!prefs.configured) return setup()
         val st = Sync.loadState(prefs)
         when {
@@ -125,7 +137,7 @@ class MainActivity : Activity() {
             st.kids.none { it.id == prefs.activeKid } -> { dictSession = null; pickKid(st) }
             tutorView != null -> tutorView!!.invoke()
             dictSession != null -> dictationScreen()
-            else -> home(st, st.kids.first { it.id == prefs.activeKid })
+            else -> { val kid = st.kids.first { it.id == prefs.activeKid }; buildNav(); nav.visibility = View.VISIBLE; home(st, kid) }
         }
     }
 
@@ -177,7 +189,38 @@ class MainActivity : Activity() {
     }
 
     private fun home(st: State, kid: Kid) {
-        val kidIdx = st.kids.indexOf(kid)
+        when (homeTab) {
+            "learn" -> learnTab(kid)
+            "apps" -> appsTab(kid, Env.buildCtx(this, prefs, st))
+            "score" -> scoreTab(st, kid)
+            "more" -> moreTab(kid)
+            else -> homeMain(st, kid)
+        }
+    }
+
+    /** Bottom menu: every section has its own screen, so nothing needs endless scrolling. */
+    private fun buildNav() {
+        nav.removeAllViews()
+        listOf("home" to ("🏠" to "خانه"), "learn" to ("📖" to "درس"), "apps" to ("🎮" to "برنامه‌ها"),
+               "score" to ("🏆" to "امتیاز"), "more" to ("⚙️" to "بیشتر")).forEach { (k, ev) ->
+            val on = k == homeTab
+            nav.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                background = if (on) ui.shape(Color.parseColor("#EFE9FF"), 16f) else null
+                setPadding(0, ui.dp(6), 0, ui.dp(6)); isClickable = true
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = ui.dp(3); marginEnd = ui.dp(3) }
+                addView(TextView(this@MainActivity).apply { text = ev.first; textSize = 22f; gravity = Gravity.CENTER })
+                addView(TextView(this@MainActivity).apply {
+                    text = ev.second; textSize = 11f; gravity = Gravity.CENTER; maxLines = 1
+                    setTextColor(if (on) Pal.PURPLE else Pal.MUTED); if (on) setTypeface(typeface, android.graphics.Typeface.BOLD)
+                })
+                setOnClickListener { if (homeTab != k) { homeTab = k; render(); scroll.post { scroll.scrollTo(0, 0) } } }
+            })
+        }
+    }
+
+    // ---- tab 1: home = greeting, phone time, today's tasks ----
+    private fun homeMain(st: State, kid: Kid) {
         val c = Env.buildCtx(this, prefs, st)
         val remain = Policy.remainingMinutes(kid, c)
         val total = kid.dailyLimitMin + c.extraMin
@@ -202,6 +245,7 @@ class MainActivity : Activity() {
             kid.penalties.forEach { addView(ui.text("−${fa(it.points)}  ${it.title}", 15f, Pal.INK)) }
         })
 
+
         // ---- countdown ring ----
         val ringCard = ui.card(); val rr = ui.row()
         val ring = RingView(this).apply {
@@ -216,6 +260,7 @@ class MainActivity : Activity() {
         rt.addView(ui.text("هر چی کمتر بازی کنی، امتیاز بیشتر می‌گیری 🌟", 13f, Pal.PURPLE))
         rr.addView(rt); ringCard.addView(rr); add(ringCard)
 
+
         // ---- tasks ----
         val done = kid.tasks.count { it.status == "approved" }
         add(ui.title("🎯 کارهای امروز"))
@@ -228,6 +273,10 @@ class MainActivity : Activity() {
         }
         kid.tasks.forEach { t -> add(taskCard(t)) }
 
+    }
+
+    // ---- tab 2: tutor + dictation ----
+    private fun learnTab(kid: Kid) {
         // ---- dictation ----
         add(ui.pill("🎓 معلم من", Pal.BLUE) { TutorState.kidId = kid.id; goTo { tutorHome(kid) } })
         add(ui.title("📖 دیکته"))
@@ -245,9 +294,10 @@ class MainActivity : Activity() {
             add(card)
         }
 
-        // ---- competition charts ----
-        if (st.kids.size > 1 || kid.weekPoints.isNotEmpty()) chartCards(st, kidIdx)
+    }
 
+    // ---- tab 3: apps ----
+    private fun appsTab(kid: Kid, c: Policy.Ctx) {
         // ---- apps ----
         add(ui.title("🎮 برنامه‌های من"))
         val allowed = kid.rules.filter { !it.locked || it.alwaysOn }
@@ -261,6 +311,17 @@ class MainActivity : Activity() {
             }
         })
 
+    }
+
+    // ---- tab 4: points, charts, wishes ----
+    private fun scoreTab(st: State, kid: Kid) {
+        val kidIdx = st.kids.indexOf(kid)
+        add(ui.title("🏆 امتیاز من"))
+        add(ui.card().apply {
+            addView(ui.text("موجودی امتیاز", 14f, Pal.MUTED, true))
+            addView(ui.text("🪙 ${fa(kid.balance)}", 34f, Pal.PURPLE, true))
+        })
+        if (st.kids.size > 1 || kid.weekPoints.isNotEmpty()) chartCards(st, kidIdx)
         // ---- wishlist ----
         if (kid.wishlist.isNotEmpty()) {
             add(ui.title("🎁 آرزوهای من"))
@@ -276,6 +337,13 @@ class MainActivity : Activity() {
             }
         }
 
+        if (kid.wishlist.isEmpty() && st.kids.size <= 1 && kid.weekPoints.isEmpty())
+            add(ui.card().apply { addView(ui.text("هنوز چیزی برای نمایش نیست؛ با انجام کارها امتیاز جمع کن 🌟", 15f, Pal.MUTED)) })
+    }
+
+    // ---- tab 5: more (settings of the kid + parent entry) ----
+    private fun moreTab(kid: Kid) {
+        add(ui.title("⚙️ بیشتر"))
         add(ui.pill("🖼 پس‌زمینه‌ی من", Pal.ORANGE) { pickBackground() })
         if (prefs.bgPath.isNotEmpty()) add(ui.pill("↩ برگرداندن پس‌زمینه‌ی پیش‌فرض", Pal.MUTED) {
             prefs.bgPath = ""; File(filesDir, "bg.jpg").delete(); applyBackground(); render()

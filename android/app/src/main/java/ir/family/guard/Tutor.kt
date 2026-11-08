@@ -71,7 +71,7 @@ fun MainActivity.tutorHome(kid: Kid) {
 
 fun MainActivity.tutorIntro(kid: Kid, subject: String) {
     TutorState.subject = subject
-    goTo { tutorIntro(kid, subject) }
+    tutorView = { tutorIntro(kid, subject) }
     box.removeAllViews()
     tutorBack(kid)
     add(ui.text("📚 $subject", 24f, Pal.INK, true))
@@ -147,7 +147,7 @@ fun MainActivity.tutorResultCard(kid: Kid, subject: String, res: JSONObject) {
 }
 
 fun MainActivity.tutorHub(kid: Kid, subject: String, r: JSONObject) {
-    goTo { tutorHub(kid, subject, r) }
+    tutorView = { tutorHub(kid, subject, r) }
     box.removeAllViews()
     tutorBack(kid)
     add(ui.text("📚 $subject · سطح: ${r.optString("level")}", 22f, Pal.INK, true))
@@ -158,7 +158,7 @@ fun MainActivity.tutorHub(kid: Kid, subject: String, r: JSONObject) {
 }
 
 fun MainActivity.tutorPlan(kid: Kid, subject: String) {
-    goTo { tutorPlan(kid, subject) }
+    tutorView = { tutorPlan(kid, subject) }
     box.removeAllViews()
     tutorBack(kid)
     add(ui.text("📅 برنامه‌ی امروز", 22f, Pal.INK, true))
@@ -182,7 +182,7 @@ fun MainActivity.tutorPlan(kid: Kid, subject: String) {
 }
 
 fun MainActivity.tutorPractice(kid: Kid, subject: String, topic: String) {
-    goTo { tutorPractice(kid, subject, topic) }
+    tutorView = { tutorPractice(kid, subject, topic) }
     box.removeAllViews()
     tutorBack(kid)
     add(ui.text("🎯 تمرین" + (if (topic.isEmpty()) "" else " · $topic"), 22f, Pal.INK, true))
@@ -226,7 +226,7 @@ fun MainActivity.tutorChecked(kid: Kid, subject: String, res: JSONObject) {
 }
 
 fun MainActivity.tutorExplain(kid: Kid, subject: String, prefill: String) {
-    goTo { tutorExplain(kid, subject, prefill) }
+    tutorView = { tutorExplain(kid, subject, prefill) }
     box.removeAllViews()
     tutorBack(kid)
     add(ui.text("📖 چی را توضیح بدم؟", 22f, Pal.INK, true))
@@ -243,7 +243,7 @@ fun MainActivity.tutorExplain(kid: Kid, subject: String, prefill: String) {
 }
 
 fun MainActivity.tutorExplainCall(kid: Kid, subject: String, text: String, simpler: Boolean) {
-    goTo { tutorExplain(kid, subject, text) }
+    tutorView = { tutorExplain(kid, subject, text) }
     box.removeAllViews()
     tutorBack(kid)
     add(ui.text("⏳ معلم دارد تخته را آماده می‌کند…", 18f, Pal.MUTED, true))
@@ -272,7 +272,7 @@ private fun boardHtml(svg: String): String = """<html><head><meta name="viewport
 
 /** The whiteboard: one step at a time, a drawing, a sentence read aloud, and a check question. */
 fun MainActivity.tutorBoard(kid: Kid, subject: String, r: JSONObject, text: String) {
-    goTo { tutorBoard(kid, subject, r, text) }
+    tutorView = { tutorBoard(kid, subject, r, text) }
     box.removeAllViews()
     tutorBack(kid)
     val steps = r.getJSONArray("steps")

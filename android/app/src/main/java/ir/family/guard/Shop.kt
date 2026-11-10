@@ -14,10 +14,15 @@ import kotlin.math.ceil
 val SHOP_HOSTS = listOf("digikala.com", "torob.com", "technolife.com", "ketabsara.com")
 private const val SHOP_HOME = "https://www.digikala.com/"
 
-private fun hostOk(url: String): Boolean = try {
-    val h = URI(url).host?.lowercase() ?: return false
-    SHOP_HOSTS.any { h == it || h.endsWith(".$it") }
-} catch (e: Exception) { false }
+private fun hostOk(url: String): Boolean {
+    val h = try {
+        URI(url).host?.lowercase()
+    } catch (e: Exception) {
+        null
+    } ?: return false
+
+    return SHOP_HOSTS.any { h == it || h.endsWith(".$it") }
+}
 
 /** The kid's wishes: progress, what is already affordable, and how many points are still missing. */
 fun MainActivity.wishlistSection(st: State, kid: Kid) {

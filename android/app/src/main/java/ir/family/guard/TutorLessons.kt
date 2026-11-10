@@ -22,11 +22,19 @@ fun MainActivity.lessonCall(kid: Kid, subject: String, body: JSONObject, then: (
     body.put("kid_id", kid.id).put("day", Sync.today()).put("subject", subject)
     thread {
         val (code, r) = Sync.tutorLesson(prefs, body)
-        runOnUiThread { then(code, r) }
+        runOnUiThread {
+            try { then(code, r) }
+            catch (e: Exception) {
+                android.util.Log.e("tutor", "lesson reply shape", e)
+                toast("جواب درس کامل نبود؛ دوباره امتحان کن 🔄")
+            }
+        }
     }
 }
 
-fun MainActivity.tutorLessons(kid: Kid, subject: String) {
+fun MainActivity.tutorLessons(kid: Kid, subject: String) = safely("tutorLessons") { tutorLessonsUnsafe(kid, subject) }
+
+private fun MainActivity.tutorLessonsUnsafe(kid: Kid, subject: String) {
     goTo { tutorLessons(kid, subject) }
     TutorState.lessonId = ""
     box.removeAllViews()
@@ -74,7 +82,9 @@ fun MainActivity.tutorOpenLesson(kid: Kid, subject: String, lessonId: String) {
     }
 }
 
-fun MainActivity.tutorLessonHub(kid: Kid, subject: String, lesson: JSONObject) {
+fun MainActivity.tutorLessonHub(kid: Kid, subject: String, lesson: JSONObject) = safely("tutorLessonHub") { tutorLessonHubUnsafe(kid, subject, lesson) }
+
+private fun MainActivity.tutorLessonHubUnsafe(kid: Kid, subject: String, lesson: JSONObject) {
     goTo { tutorLessonHub(kid, subject, lesson) }
     TutorState.subject = subject; TutorState.kidId = kid.id; TutorState.lessonId = lesson.getString("id")
     box.removeAllViews()
@@ -131,7 +141,9 @@ fun MainActivity.tutorLessonHub(kid: Kid, subject: String, lesson: JSONObject) {
 }
 
 /** Result of making a lesson from a photo or QR; also used when a QR is attached. */
-fun MainActivity.tutorGotLesson(sd: StatusDialog, code: Int, r: JSONObject?, attached: Boolean) {
+fun MainActivity.tutorGotLesson(sd: StatusDialog, code: Int, r: JSONObject?, attached: Boolean) = safely("tutorGotLesson") { tutorGotLessonUnsafe(sd, code, r, attached) }
+
+private fun MainActivity.tutorGotLessonUnsafe(sd: StatusDialog, code: Int, r: JSONObject?, attached: Boolean) {
     val kid = Sync.loadState(prefs)?.kids?.firstOrNull { it.id == TutorState.kidId }
     val subject = TutorState.subject
     when {

@@ -88,8 +88,10 @@ fun MainActivity.shopScreen(kid: Kid) {
     })
     add(search)
 
-    val web = WebView(this).apply {
+    // Keep one browser for the whole session: render() runs on every refresh, and rebuilding the page each time reloads it forever.
+    val web = (shopWeb ?: WebView(this).apply {
         settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true      // shop sites like Digikala render blank without it
         webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, req: WebResourceRequest?): Boolean {
                 val u = req?.url?.toString() ?: return true
@@ -99,8 +101,9 @@ fun MainActivity.shopScreen(kid: Kid) {
             }
         }
         loadUrl(SHOP_HOME)
-        layoutParams = LinearLayout.LayoutParams(-1, ui.dp(380)).apply { topMargin = ui.dp(10) }
-    }
+    }.also { shopWeb = it })
+    (web.parent as? android.view.ViewGroup)?.removeView(web)
+    web.layoutParams = LinearLayout.LayoutParams(-1, ui.dp(380)).apply { topMargin = ui.dp(10) }
     add(web)
     add(ui.pill("📌 این صفحه رو بفرست و قیمتش رو بگیر", Pal.ORANGE) {
         val u = web.url ?: ""

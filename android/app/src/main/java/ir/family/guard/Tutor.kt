@@ -48,6 +48,14 @@ fun MainActivity.goTo(screen: () -> Unit) { tutorView = screen; screen() }
 
 fun MainActivity.tutorBack(kid: Kid) = add(ui.pill("← درس‌ها", Pal.MUTED) { goTo { tutorHome(kid) } })
 
+/** Runs one screen step. If the server's reply has an unexpected shape, show a message instead of closing the app. */
+internal inline fun MainActivity.safely(what: String, block: () -> Unit) {
+    try { block() } catch (e: Exception) {
+        android.util.Log.e("tutor", "$what: unexpected reply shape", e)
+        toast("جواب معلم کامل نبود؛ دوباره امتحان کن 🔄")
+    }
+}
+
 /** Every tutor request runs in the background; the result is handled on the UI thread. */
 fun MainActivity.tutorCall(kid: Kid, body: JSONObject, then: (Int, JSONObject?) -> Unit) {
     body.put("kid_id", kid.id).put("day", Sync.today())
@@ -186,7 +194,7 @@ fun MainActivity.tutorHub(kid: Kid, subject: String, r: JSONObject) {
         })
     }
     r.optJSONObject("last_lesson")?.let { ll ->
-        add(ui.pill("📖 ادامه‌ی درس: ${ll.optString("title")} (${fa(ll.optInt("done"))} از ${fa(ll.optInt("total"))} بخش)", Pal.PURPLE) { tutorOpenLesson(kid, subject, ll.getString("id")) })
+        add(ui.pill("📖 ادامه‌ی درس: ${ll.optString("title")} (${fa(ll.optInt("done"))} از ${fa(ll.optInt("total"))} بخش)", Pal.PURPLE) { tutorOpenLesson(kid, subject, ll.optString("id")) })
     }
     add(ui.pill("📅 برنامه‌ی امروز", Pal.PURPLE) { tutorPlan(kid, subject) })
     add(ui.pill("📖 درس‌های من (کتاب، فیلم، صوت)", Pal.BLUE) { tutorLessons(kid, subject) })
@@ -195,7 +203,9 @@ fun MainActivity.tutorHub(kid: Kid, subject: String, r: JSONObject) {
     add(ui.pill("📜 سابقه‌ی من", Pal.MUTED) { tutorHistory(kid, subject) })
 }
 
-fun MainActivity.tutorPlan(kid: Kid, subject: String) {
+fun MainActivity.tutorPlan(kid: Kid, subject: String) = safely("tutorPlan") { tutorPlanUnsafe(kid, subject) }
+
+private fun MainActivity.tutorPlanUnsafe(kid: Kid, subject: String) {
     goTo { tutorPlan(kid, subject) }
     box.removeAllViews()
     tutorBack(kid)
@@ -235,7 +245,9 @@ fun MainActivity.tutorPractice(kid: Kid, subject: String, topic: String, lessonI
 }
 
 /** The questions screen. If sending fails, the typed answers stay on screen and in storage, and the button can be pressed again. */
-fun MainActivity.tutorPracticeScreen(kid: Kid, subject: String, lessonId: String?, r: JSONObject, topic: String) {
+fun MainActivity.tutorPracticeScreen(kid: Kid, subject: String, lessonId: String?, r: JSONObject, topic: String) = safely("tutorPracticeScreen") { tutorPracticeScreenUnsafe(kid, subject, lessonId, r, topic) }
+
+private fun MainActivity.tutorPracticeScreenUnsafe(kid: Kid, subject: String, lessonId: String?, r: JSONObject, topic: String) {
     goTo { tutorPracticeScreen(kid, subject, lessonId, r, topic) }
     box.removeAllViews()
     tutorBack(kid)
@@ -277,7 +289,9 @@ fun MainActivity.tutorChecked(kid: Kid, subject: String, res: JSONObject, lesson
 }
 
 /** What the kid did so far: recent exercises with scores, and lessons with progress. */
-fun MainActivity.tutorHistory(kid: Kid, subject: String) {
+fun MainActivity.tutorHistory(kid: Kid, subject: String) = safely("tutorHistory") { tutorHistoryUnsafe(kid, subject) }
+
+private fun MainActivity.tutorHistoryUnsafe(kid: Kid, subject: String) {
     goTo { tutorHistory(kid, subject) }
     box.removeAllViews()
     tutorBack(kid)
@@ -339,7 +353,9 @@ fun MainActivity.tutorExplainCall(kid: Kid, subject: String, text: String, simpl
 }
 
 /** Called after a photo of a book page was sent for explaining. */
-fun MainActivity.tutorGotExplain(code: Int, r: JSONObject?) {
+fun MainActivity.tutorGotExplain(code: Int, r: JSONObject?) = safely("tutorGotExplain") { tutorGotExplainUnsafe(code, r) }
+
+private fun MainActivity.tutorGotExplainUnsafe(code: Int, r: JSONObject?) {
     val kid = Sync.loadState(prefs)?.kids?.firstOrNull { it.id == TutorState.kidId } ?: return toast("کودک پیدا نشد")
     val subject = TutorState.subject
     if (code != 200 || r == null) {
@@ -356,7 +372,9 @@ private fun boardHtml(svg: String): String = """<html><head><meta name="viewport
 <div class="b">$svg</div></body></html>"""
 
 /** The whiteboard: one step at a time, a drawing, a sentence read aloud, and a check question. */
-fun MainActivity.tutorBoard(kid: Kid, subject: String, r: JSONObject, text: String) {
+fun MainActivity.tutorBoard(kid: Kid, subject: String, r: JSONObject, text: String) = safely("tutorBoard") { tutorBoardUnsafe(kid, subject, r, text) }
+
+private fun MainActivity.tutorBoardUnsafe(kid: Kid, subject: String, r: JSONObject, text: String) {
     goTo { tutorBoard(kid, subject, r, text) }
     box.removeAllViews()
     tutorBack(kid)

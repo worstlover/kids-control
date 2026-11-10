@@ -44,6 +44,7 @@ class MainActivity : Activity() {
     internal lateinit var box: LinearLayout
     internal var tutorView: (() -> Unit)? = null
     internal var wishView: (() -> Unit)? = null
+    internal var shopWeb: android.webkit.WebView? = null
     internal var kidTab = "today"              // which bottom tab the kid is on
     internal lateinit var navBar: LinearLayout  // bottom tab bar (always below the scroll area)
     internal lateinit var speaker: Speaker

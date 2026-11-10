@@ -107,6 +107,9 @@ object Sync {
         return post(p, "kid-pin", b)
     }
 
+    /** Kid's wish list: lookup a price (by link or name), add a wish, or remove one. */
+    fun wish(p: Prefs, body: JSONObject): Pair<Int, JSONObject?> = post(p, "wish", body.put("token", p.token), 60_000)
+
     /** Tutor: level test, plan, practice, check, explain. The server answers in a JSON object. */
     fun tutor(p: Prefs, body: JSONObject): Pair<Int, JSONObject?> = post(p, "tutor", body.put("token", p.token), 90_000)
 

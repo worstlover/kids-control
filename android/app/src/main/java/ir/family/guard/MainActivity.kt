@@ -43,6 +43,9 @@ class MainActivity : Activity() {
     internal lateinit var ui: Ui
     internal lateinit var box: LinearLayout
     internal var tutorView: (() -> Unit)? = null
+    internal var wishView: (() -> Unit)? = null
+    internal var kidTab = "today"              // which bottom tab the kid is on
+    internal lateinit var navBar: LinearLayout  // bottom tab bar (always below the scroll area)
     internal lateinit var speaker: Speaker
     internal lateinit var scroll: ScrollView
     private var pendingId: String? = null
@@ -61,8 +64,12 @@ class MainActivity : Activity() {
         box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(40)); layoutDirection = View.LAYOUT_DIRECTION_RTL }
         sv.addView(box)
         scroll = sv
+        navBar = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
+        root.addView(sv, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(navBar, LinearLayout.LayoutParams(-1, -2))
         applyBackground()
-        setContentView(sv)
+        setContentView(root)
     }
 
     override fun onResume() { super.onResume(); render(); refresh() }
@@ -118,12 +125,16 @@ class MainActivity : Activity() {
         box.removeAllViews()
         if (!prefs.configured) return setup()
         val st = Sync.loadState(prefs)
+        val active = st?.kids?.firstOrNull { it.id == prefs.activeKid }
+        navBar.visibility = if (active != null && dictSession == null) View.VISIBLE else View.GONE
+        if (active != null) tabBar(active)
         when {
             st == null -> {
                 add(ui.text("⏳ در حال دریافت اطلاعات…", 20f, Pal.INK, true))
                 add(ui.pill("🔄 تلاش دوباره", Pal.BLUE) { refresh() }); parentButton()
             }
             st.kids.none { it.id == prefs.activeKid } -> { dictSession = null; pickKid(st) }
+            wishView != null -> wishView!!.invoke()
             tutorView != null -> tutorView!!.invoke()
             dictSession != null -> dictationScreen()
             else -> home(st, st.kids.first { it.id == prefs.activeKid })
@@ -198,6 +209,7 @@ class MainActivity : Activity() {
         if (prefs.lockAll) add(ui.card().apply { addView(ui.text("⛔ گوشی فعلاً قفل است", 18f, Pal.RED, true)) })
         if (!a11yEnabled()) add(ui.card().apply { addView(ui.text("⚠ محافظت فعال نیست؛ از بخش والدین فعالش کنید.", 14f, Color.parseColor("#B45309"))) })
 
+        if (kidTab == "today") {
         if (kid.penalties.isNotEmpty()) add(ui.card().apply {
             addView(ui.text("⚠️ امروز امتیاز کم شد", 17f, Pal.RED, true))
             kid.penalties.forEach { addView(ui.text("−${fa(it.points)}  ${it.title}", 15f, Pal.INK)) }
@@ -217,6 +229,8 @@ class MainActivity : Activity() {
         rt.addView(ui.text("هر چی کمتر بازی کنی، امتیاز بیشتر می‌گیری 🌟", 13f, Pal.PURPLE))
         rr.addView(rt); ringCard.addView(rr); add(ringCard)
 
+        }
+        if (kidTab == "tasks") {
         // ---- tasks ----
         val done = kid.tasks.count { it.status == "approved" }
         add(ui.title("🎯 کارهای امروز"))
@@ -230,7 +244,6 @@ class MainActivity : Activity() {
         kid.tasks.forEach { t -> add(taskCard(t)) }
 
         // ---- dictation ----
-        add(ui.pill("🎓 معلم من", Pal.BLUE) { TutorState.kidId = kid.id; goTo { tutorHome(kid) } })
         add(ui.title("📖 دیکته"))
         add(ui.pill("📸 دیکته‌ی جدید از روی کتاب", Pal.ORANGE) { takePhoto("book", kid.id) })
         kid.dictations.forEach { d ->
@@ -246,9 +259,13 @@ class MainActivity : Activity() {
             add(card)
         }
 
+        }
+        if (kidTab == "points") {
         // ---- competition charts ----
         if (st.kids.size > 1 || kid.weekPoints.isNotEmpty()) chartCards(st, kidIdx)
 
+        }
+        if (kidTab == "apps") {
         // ---- apps ----
         add(ui.title("🎮 برنامه‌های من"))
         val allowed = kid.rules.filter { !it.locked || it.alwaysOn }
@@ -262,37 +279,8 @@ class MainActivity : Activity() {
             }
         })
 
-        // ---- wishlist ----
-        if (kid.wishlist.isNotEmpty()) {
-            add(ui.title("🎁 آرزوهای من"))
-            val savedToman = maxOf(0L, kid.balance) * st.tomanPerPoint
-            kid.wishlist.forEach { w ->
-                val price = (w.priceToman ?: 0L).toDouble()
-                add(ui.card().apply {
-                    addView(ui.text(w.title, 18f, Pal.INK, true))
-                    if (price <= 0) { addView(ui.text("قیمتش هنوز مشخص نشده", 14f, Pal.MUTED)); return@apply }
-                    val pct = (savedToman / price).coerceIn(0.0, 1.0)
-                    addView(ui.row().apply {
-                        addView(ui.text("قیمت: ${fa(price.toLong())} تومان", 14f, Pal.MUTED).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
-                        addView(ui.text(fa(String.format("%.1f", pct * 100)) + "٪", 24f, Pal.PURPLE, true))
-                    })
-                    addView(BarView(this@MainActivity).apply {
-                        fraction = pct.toFloat(); barColor = Pal.PINK; barColor2 = Pal.ORANGE
-                        layoutParams = LinearLayout.LayoutParams(-1, ui.dp(18)).apply { topMargin = ui.dp(8) }
-                    })
-                    addView(ui.row().apply {
-                        addView(ui.text("✅ جمع شده: ${fa(savedToman.toLong())} تومان", 14f, Pal.GREEN, true).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
-                        addView(ui.text("⏳ مانده: ${fa(maxOf(0.0, price - savedToman).toLong())} تومان", 14f, Pal.ORANGE, true))
-                    })
-                    addView(ui.text(
-                        if (pct >= 1.0) "🎉 رسیدی! به بابا و مامان بگو"
-                        else "🪙 ${fa(maxOf(0L, w.pointsLeft ?: 0L))} امتیاز دیگه مونده",
-                        15f, if (pct >= 1.0) Pal.GREEN else Pal.PURPLE, true))
-                    addView(ui.text("هر ${fa(st.tomanPerPoint.toLong())} تومان = یک امتیاز", 12f, Pal.MUTED))
-                })
-            }
         }
-
+        if (kidTab == "points") wishlistSection(st, kid)
         add(ui.space(14))
         val foot = ui.row()
         foot.addView(ui.pill("👋 عوض کردن", Pal.BLUE) { prefs.activeKid = null; render() }.apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = ui.dp(6); topMargin = ui.dp(10) } })
@@ -410,6 +398,31 @@ class MainActivity : Activity() {
     // ================= parent mode =================
     private fun parentPill() = ui.pill("🔑 والدین", Pal.MUTED) { parentLogin() }
     private fun parentButton() = add(parentPill())
+
+    /** Fixed bottom tab bar for the kid: today / tasks / tutor / apps / points. */
+    private fun tabBar(kid: Kid) {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; setBackgroundColor(Color.WHITE); elevation = ui.dpf(8f)
+            setPadding(ui.dp(6), ui.dp(6), ui.dp(6), ui.dp(6))
+        }
+        val tabs = listOf("today" to "📋 امروز", "tasks" to "🎯 کارها", "tutor" to "🎓 معلم", "apps" to "🎮 برنامه", "points" to "🪙 امتیاز")
+        tabs.forEach { (key, label) ->
+            val sel = if (key == "tutor") tutorView != null else (key == kidTab && tutorView == null)
+            bar.addView(TextView(this).apply {
+                text = label; textSize = 12f; gravity = Gravity.CENTER
+                setTypeface(typeface, if (sel) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                setTextColor(if (sel) Color.WHITE else Color.parseColor("#1F2937"))
+                background = ui.shape(if (sel) Color.parseColor("#7C3AED") else Color.TRANSPARENT, 16f)
+                setPadding(0, ui.dp(10), 0, ui.dp(10))
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = ui.dp(2); marginEnd = ui.dp(2) }
+                setOnClickListener {
+                    if (key == "tutor") { TutorState.kidId = kid.id; tutorView = { tutorHome(kid) }; render() }
+                    else { tutorView = null; wishView = null; kidTab = key; render() }
+                }
+            })
+        }
+        navBar.removeAllViews(); navBar.addView(bar)
+    }
 
     private fun parentLogin() {
         if (prefs.parentPinHash.isEmpty()) return toast("رمز والدین ثبت نشده")

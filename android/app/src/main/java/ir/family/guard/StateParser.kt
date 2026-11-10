@@ -24,7 +24,7 @@ object StateParser {
                     TaskItem(t.getString("log_id"), t.getString("title"), t.optInt("points", 0), t.optBoolean("needs_photo", false),
                         t.getString("status"), t.dblOrNull("ai_score"), t.str("ai_feedback"))
                 },
-                k.optJSONArray("wishlist").mapObjs { w -> WishItem(w.getString("title"), w.longOrNull("price_toman"), w.longOrNull("points_needed"), w.longOrNull("points_left")) },
+                k.optJSONArray("wishlist").mapObjs { w -> WishItem(w.getString("id"), w.getString("title"), w.longOrNull("price_toman"), w.longOrNull("points_needed"), w.longOrNull("points_left")) },
                 k.optJSONArray("rules").mapObjs { r ->
                     Rule(r.getString("package_name"), r.optBoolean("locked", false), r.optString("category", "other"), r.intOrNull("daily_limit_min"),
                         r.str("allowed_from"), r.str("allowed_to"), r.optBoolean("lock_until_tasks_done", false), r.optBoolean("always_on", false))

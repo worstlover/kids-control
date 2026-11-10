@@ -35,14 +35,15 @@ class Api(ctx: Context) {
         c.requestMethod = method
         c.connectTimeout = 15_000
         c.readTimeout = 30_000
+        // All request headers must be set BEFORE the body is written (outputStream connects the request).
         c.setRequestProperty("apikey", key)
         c.setRequestProperty("Authorization", "Bearer " + if (withSession) access else key)
+        if (prefer != null) c.setRequestProperty("Prefer", prefer)
         if (body != null) {
             c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")
             c.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
         }
-        if (prefer != null) c.setRequestProperty("Prefer", prefer)
         val code = c.responseCode
         val text = (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
         return code to text

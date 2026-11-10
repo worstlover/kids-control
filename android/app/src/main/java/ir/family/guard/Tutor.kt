@@ -52,8 +52,15 @@ fun MainActivity.tutorBack(kid: Kid) = add(ui.pill("← درس‌ها", Pal.MUTE
 fun MainActivity.tutorCall(kid: Kid, body: JSONObject, then: (Int, JSONObject?) -> Unit) {
     body.put("kid_id", kid.id).put("day", Sync.today())
     thread {
-        val (code, r) = Sync.tutor(prefs, body)
-        runOnUiThread { then(code, r) }
+        // Never let a bad/partial reply from the server crash the app.
+        val (code, r) = try { Sync.tutor(prefs, body) } catch (e: Exception) { Pair(-1, null) }
+        runOnUiThread {
+            try { then(code, r) }
+            catch (e: Exception) {
+                android.util.Log.e("tutor", "unexpected reply shape", e)
+                toast("جواب معلم کامل نبود؛ دوباره امتحان کن 🔄")
+            }
+        }
     }
 }
 

@@ -11,7 +11,7 @@ data class TaskItem(
     val logId: String, val title: String, val points: Int, val needsPhoto: Boolean,
     val status: String, val aiScore: Double?, val aiFeedback: String?,
 )
-data class WishItem(val title: String, val priceToman: Long?, val pointsNeeded: Long?, val pointsLeft: Long?)
+data class WishItem(val id: String, val title: String, val priceToman: Long?, val pointsNeeded: Long?, val pointsLeft: Long?)
 data class PenaltyItem(val title: String, val points: Int)
 data class DictItem(
     val id: String, val title: String, val status: String, val points: Int, val phraseCount: Int,

@@ -52,7 +52,7 @@ private fun MainActivity.tutorLessonsUnsafe(kid: Kid, subject: String) {
             add(ui.card().apply {
                 addView(ui.text(l.getString("title") + if (l.getString("status") == "done") " ✅" else "", 18f, Pal.INK, true))
                 addView(ui.text("${fa(done)} از ${fa(secs.length())} بخش", 14f, Pal.MUTED))
-                if (secs.length() > 0) addView(BarView(this@tutorLessons).apply {
+                if (secs.length() > 0) addView(BarView(this@MainActivity).apply {
                     fraction = done / secs.length().toFloat(); barColor = Pal.GREEN; barColor2 = Pal.BLUE
                     layoutParams = LinearLayout.LayoutParams(-1, ui.dp(10)).apply { topMargin = ui.dp(6) }
                 })

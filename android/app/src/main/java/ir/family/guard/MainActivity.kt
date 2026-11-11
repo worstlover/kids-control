@@ -123,6 +123,7 @@ class MainActivity : Activity() {
     // ================= screens =================
     internal fun render() {
         applyBackground()
+        TutorState.gen++                       // tutor replies still on their way belong to the old screen
         box.removeAllViews()
         if (!prefs.configured) return setup()
         val st = Sync.loadState(prefs)
@@ -470,6 +471,7 @@ class MainActivity : Activity() {
     override fun onActivityResult(req: Int, res: Int, data: Intent?) {
         super.onActivityResult(req, res, data)
         if (req == 9) { onBackgroundPicked(res, data); return }
+        if (req == 11) { onSpeechResult(res, data); return }
         if (req != 7) return
         prefs.graceUntil = 0
         val uri = photoUri; val id = pendingId; val kind = pendingKind; photoUri = null; pendingId = null
@@ -491,14 +493,18 @@ class MainActivity : Activity() {
             val (code, r) = when (kind) {
                 "book" -> Sync.dictCreate(prefs, id, b64, progress)
                 "dict" -> Sync.submitDictation(prefs, id, b64, progress)
-                "lessonpage" -> Sync.tutorLesson(prefs, JSONObject().put("action", "create").put("kid_id", TutorState.kidId).put("subject", TutorState.subject).put("day", Sync.today()).put("image_b64", b64).put("media_type", "image/jpeg"), 90_000, progress)
-                "tutor" -> Sync.tutor(prefs, org.json.JSONObject().put("action", "explain").put("subject", TutorState.subject).put("day", Sync.today()).put("image_b64", b64).put("media_type", "image/jpeg"))
+                "lessonpage" -> Sync.tutorLesson(prefs, JSONObject().put("action", "create").put("kid_id", TutorState.kidId).put("subject", TutorState.subject).put("track", TutorState.track).put("day", Sync.today()).put("image_b64", b64).put("media_type", "image/jpeg"), 90_000, progress)
+                "solution" -> Sync.tutor(prefs, JSONObject().put("action", "check").put("kid_id", TutorState.kidId).put("subject", TutorState.subject).put("track", TutorState.track)
+                    .put("day", Sync.today()).put("exercise_id", id).put("answers", org.json.JSONArray(TutorState.drafts[id] ?: emptyList<String>()))
+                    .put("image_b64", b64).put("media_type", "image/jpeg"))
+                "tutor" -> Sync.tutor(prefs, org.json.JSONObject().put("action", "explain").put("kid_id", TutorState.kidId).put("subject", TutorState.subject).put("track", TutorState.track).put("day", Sync.today()).put("image_b64", b64).put("media_type", "image/jpeg"))
                 else -> Sync.submit(prefs, id, b64, progress)
             }
             runOnUiThread {
                 if (kind == "dict" && code == 200 && r?.optString("status") != "retake") dictSession = null
                 if (kind == "lessonpage") tutorGotLesson(sd, code, r, false)
                 else if (kind == "tutor") { sd.dismiss(); tutorGotExplain(code, r) }
+                else if (kind == "solution") { sd.dismiss(); tutorGotSolution(code, r, id) }
                 else if (kind == "book") bookResult(sd, code, r) else gradeResult(sd, code, r)
                 refresh()
             }
@@ -524,7 +530,7 @@ class MainActivity : Activity() {
             if (url == null) { runOnUiThread { sd.result("🔳", "QR پیدا نشد", "نزدیک‌تر و واضح‌تر عکس بگیر؛ QR کامل و صاف توی عکس باشد.", null, null, "دوباره می‌گیرم") }; return@thread }
             val attach = TutorState.lessonId.isNotEmpty()
             runOnUiThread { sd.setStep(0, StatusDialog.DONE); sd.waitingForAi(2) }
-            val body = JSONObject().put("kid_id", TutorState.kidId).put("subject", TutorState.subject).put("day", Sync.today()).put("qr_url", url)
+            val body = JSONObject().put("kid_id", TutorState.kidId).put("subject", TutorState.subject).put("track", TutorState.track).put("day", Sync.today()).put("qr_url", url)
             if (attach) body.put("action", "attach_qr").put("lesson_id", TutorState.lessonId) else body.put("action", "create")
             val (code, r) = Sync.tutorLesson(prefs, body)
             runOnUiThread { tutorGotLesson(sd, code, r, attach); refresh() }

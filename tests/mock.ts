@@ -55,6 +55,11 @@ Deno.serve({ port: 4001, onListen() {} }, async (req) => {
     if (text.includes('[TUTOR_PRACTICE]')) return reply({ questions: [1, 2, 3, 4, 5].map(i => ({ q: 'پرسش ' + i, a: 'p' + i + 'a' })) });
     if (text.includes('[TUTOR_CHECK]') && text.includes('AIFAIL')) return new Response('boom', { status: 500 });
     if (text.includes('[TUTOR_CHECK]')) return reply({ results: [{ correct: true, hint: '' }, { correct: false, hint: 'دوباره فکر کن' }, { correct: true, hint: '' }, { correct: true, hint: '' }, { correct: true, hint: '' }], notes: 'جمع خوب، تفریق ضعیف' });
+    if (text.includes('[TUTOR_STEP_CHECK]')) return reply(text.includes('جواب بچه: درست') ? { correct: true, feedback: 'آفرین', say: null, board: null }
+      : { correct: false, feedback: 'نزدیک بودی', say: 'از راه دیگر: نصف یعنی دو تکه‌ی برابر', board: '<svg viewBox="0 0 400 240"><circle cx="200" cy="120" r="60" stroke="#F8F8F2"/><script>x</script></svg>' });
+    if (text.includes('[TUTOR_TEACH_BACK]')) return reply(text.includes('تکه') ? { score: 85, covered: ['کسر یعنی تکه'], missing: [], feedback: 'خوب یاد دادی' } : { score: 30, covered: [], missing: ['مخرج'], feedback: 'مخرج را جا انداختی' });
+    if (text.includes('[TUTOR_EXIT]')) return reply({ questions: [{ type: 'apply', q: 'e1', a: 'e1a' }, { type: 'find_error', q: 'e2', a: 'e2a' }, { type: 'why', q: 'e3', a: 'e3a' }] });
+    if (text.includes('[TUTOR_REVIEW]')) return reply({ questions: [{ q: 'r1', a: 'r1a' }, { q: 'r2', a: 'r2a' }] });
     if (text.includes('[TUTOR_EXPLAIN]')) {
       if (text.includes('خیلی ساده‌تر')) return reply({ title: 'ساده', steps: [{ say: 'مثل یک پیتزا', board: '<svg viewBox="0 0 400 240"><circle cx="200" cy="120" r="80"/></svg>', ask: null }] });
       return reply({ title: 'کسر', steps: [

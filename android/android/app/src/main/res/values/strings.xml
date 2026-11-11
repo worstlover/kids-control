@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">نگهبان خانواده</string>
+    <string name="a11y_desc">برای کنترل زمان و قفل برنامه‌ها روی گوشی فرزندان. فقط نام برنامه‌ی در حال استفاده را می‌بیند و محتوای صفحه را نمی‌خواند.</string>
+</resources>

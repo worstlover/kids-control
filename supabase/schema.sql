@@ -252,6 +252,26 @@ alter table dictations add column if not exists audio_url text;             -- o
 alter table dictations add column if not exists segments jsonb;             -- [{start,end}] seconds, one per phrase
 alter table dictations add column if not exists lesson_id uuid;
 
+-- Tutor v5: what the kid has really learned, one row per concept (spaced review: 1, 3, 7, 21, 60 days)
+create table if not exists tutor_concepts (
+  id uuid primary key default gen_random_uuid(),
+  kid_id uuid not null references kids on delete cascade,
+  subject text not null,                    -- same key as tutor_profiles.subject ('free:<name>' for free classes)
+  name text not null,
+  stage int not null default 0,             -- 0 practicing, 1-2 passed early reviews, 3 learned, 4 solid
+  status text not null default 'new' check (status in ('new','practicing','learned','solid')),
+  next_review date,
+  attempts int not null default 0,          -- questions answered about it
+  first_try_correct int not null default 0,
+  hints int not null default 0,             -- wrong answers on the board (each one got a hint / new explanation)
+  simpler int not null default 0,           -- times the kid asked for a simpler explanation
+  last_seen date,
+  updated_at timestamptz default now(),
+  unique (kid_id, subject, name)
+);
+create index if not exists tutor_concepts_due on tutor_concepts (kid_id, subject, next_review);
+alter table tutor_profiles add column if not exists level_changed_at timestamptz;   -- level moves with recent results; only results after the last move count
+
 -- Installed apps reported by the phone (parent picks which are allowed)
 create table if not exists device_apps (
   device_id uuid not null references devices on delete cascade,
@@ -278,7 +298,7 @@ do $$
 declare t text;
 begin
   foreach t in array array['settings','kids','tasks','task_logs','app_rules','usage_logs',
-    'points_ledger','wishlist','month_closings','devices','device_commands','device_apps','dictations','tutor_profiles','tutor_plans','tutor_exercises','penalty_rules','penalty_logs','tutor_lessons']
+    'points_ledger','wishlist','month_closings','devices','device_commands','device_apps','dictations','tutor_profiles','tutor_plans','tutor_exercises','penalty_rules','penalty_logs','tutor_lessons','tutor_concepts']
   loop
     execute format('alter table %I enable row level security', t);
     execute format('drop policy if exists parent_all on %I', t);

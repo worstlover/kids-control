@@ -155,3 +155,54 @@ Deno.test('cleanSegments keeps only sensible timestamps', () => {
   assertEquals(segs.map(s => s.text), ['الف', 'ج', 'ز']);
   assertEquals(L.cleanSegments('no'), []);
 });
+Deno.test('tutor tracks: school vs free', () => {
+  assertEquals(L.subjectKey('Math', undefined), 'math');
+  assertEquals(L.subjectKey('english', 'school'), 'english');
+  assertEquals(L.subjectKey('English', 'free'), 'free:english');
+  assertEquals(L.subjectKey('free:شطرنج', undefined), 'free:شطرنج');
+  assertEquals(L.subjectKey('free:گیتار', 'free'), 'free:گیتار');
+  assertEquals(L.subjectKey('  ', 'free'), '');
+  assertEquals(L.subjectKey('free:', 'free'), '');
+  assertEquals(L.subjectKey(42, 'free'), '');
+  assertEquals(L.subjectKey('x'.repeat(60), 'free').length, 45);
+  assertEquals(L.splitSubject('free:شطرنج'), { track: 'free', name: 'شطرنج' });
+  assertEquals(L.splitSubject('math'), { track: 'school', name: 'math' });
+  assertEquals(L.trackOf('anything'), 'school');
+});
+Deno.test('tutor mastery: spaced review', () => {
+  const c0 = { stage: 0, attempts: 0, first_try_correct: 0, next_review: null };
+  assertEquals(L.conceptStatus(0, 0), 'new');
+  // same-day practice does not promote, but schedules a review tomorrow
+  let r = L.applyConceptResult(c0, 1, 1, '2026-11-11', false);
+  assertEquals([r.stage, r.status, r.next_review], [0, 'practicing', '2026-11-12']);
+  // exit quiz passed (2/3) -> stage 1, review in 3 days
+  r = L.applyConceptResult(c0, 2, 3, '2026-11-11', true);
+  assertEquals([r.stage, r.status, r.next_review, r.moved], [1, 'practicing', '2026-11-14', 1]);
+  // 3-day and 7-day reviews passed -> learned at stage 3
+  let c = { ...c0, ...r };
+  r = L.applyConceptResult(c, 1, 1, '2026-11-14', L.isDue(c, '2026-11-14')); c = { ...c, ...r };
+  assertEquals([r.stage, r.next_review], [2, '2026-11-21']);
+  assertEquals(L.isDue(c, '2026-11-20'), false);
+  r = L.applyConceptResult(c, 1, 1, '2026-11-21', L.isDue(c, '2026-11-21')); c = { ...c, ...r };
+  assertEquals([r.stage, r.status, r.next_review], [3, 'learned', '2026-12-12']);
+  r = L.applyConceptResult(c, 1, 1, '2026-12-12', true); c = { ...c, ...r };
+  assertEquals([r.stage, r.status], [4, 'solid']);
+  // forgot it -> back to practicing, review tomorrow
+  r = L.applyConceptResult(c, 0, 1, '2027-02-20', true);
+  assertEquals([r.stage, r.status, r.next_review, r.moved], [0, 'practicing', '2027-02-21', -4]);
+  // half right: no move, keeps its review day
+  r = L.applyConceptResult({ stage: 1, attempts: 3, first_try_correct: 2, next_review: '2026-11-14' }, 1, 2, '2026-11-14', true);
+  assertEquals([r.stage, r.next_review], [1, '2026-11-14']);
+  assertEquals(L.conceptKey('  Fractions   ADD '), 'fractions add');
+  assertEquals(L.addDays('2026-12-30', 3), '2027-01-02');
+});
+Deno.test('tutor level + points', () => {
+  assertEquals(L.nextLevel('متوسط', [1, 0.8]), 'متوسط');               // too few checks
+  assertEquals(L.nextLevel('متوسط', [0.8, 1, 0.8, 1]), 'پیشرفته');
+  assertEquals(L.nextLevel('پیشرفته', [1, 1, 1]), 'پیشرفته');
+  assertEquals(L.nextLevel('متوسط', [0.2, 0.4, 0.6]), 'مبتدی');
+  assertEquals(L.nextLevel(null, [1, 1, 1]), null);
+  assertEquals(L.answerPoints(true, true, true), 2);
+  assertEquals(L.answerPoints(true, false), 0);
+  assertEquals(L.answerPoints(false, true), 0);
+});

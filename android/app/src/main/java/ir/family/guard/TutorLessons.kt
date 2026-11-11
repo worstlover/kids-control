@@ -17,34 +17,29 @@ import android.widget.VideoView
 import org.json.JSONObject
 import kotlin.concurrent.thread
 
-/** Same idea as tutorCall, but for the lessons endpoint. */
-fun MainActivity.lessonCall(kid: Kid, subject: String, body: JSONObject, then: (Int, JSONObject?) -> Unit) {
-    body.put("kid_id", kid.id).put("day", Sync.today()).put("subject", subject)
+/** Same idea as tutorCall, but for the lessons endpoint (same school/free split, same "drop replies for an old screen"). */
+fun MainActivity.lessonCall(kid: Kid, subject: String, body: JSONObject, always: Boolean = false, then: (Int, JSONObject?) -> Unit) {
+    body.put("kid_id", kid.id).put("day", Sync.today()).put("subject", subject).put("track", TutorState.track)
+    val gen = TutorState.gen
     thread {
-        val (code, r) = Sync.tutorLesson(prefs, body)
-        runOnUiThread {
-            try { then(code, r) }
-            catch (e: Exception) {
-                android.util.Log.e("tutor", "lesson reply shape", e)
-                toast("جواب درس کامل نبود؛ دوباره امتحان کن 🔄")
-            }
-        }
+        val (code, r) = try { Sync.tutorLesson(prefs, body) } catch (e: Exception) { Pair(-1, null) }
+        runOnUiThread { deliver(gen, always) { then(code, r) } }
     }
 }
 
 fun MainActivity.tutorLessons(kid: Kid, subject: String) = safely("tutorLessons") { tutorLessonsUnsafe(kid, subject) }
 
 private fun MainActivity.tutorLessonsUnsafe(kid: Kid, subject: String) {
-    goTo { tutorLessons(kid, subject) }
+    keepScreen { tutorLessons(kid, subject) }
     TutorState.lessonId = ""
-    box.removeAllViews()
+    clearTutor()
     tutorBack(kid)
-    add(ui.text("📖 درس‌های من · $subject", 22f, Pal.INK, true))
-    add(ui.pill("➕ درس جدید از کتاب", Pal.GREEN) { tutorNewLesson(kid, subject) })
+    add(ui.text((if (isFree()) "📖 جلسه‌های من · " else "📖 درس‌های من · ") + subjectLabel(subject), 22f, Pal.INK, true))
+    add(ui.pill(if (isFree()) "➕ جلسه‌ی جدید از کتاب یا جزوه" else "➕ درس جدید از کتاب", Pal.GREEN) { tutorNewLesson(kid, subject) })
     lessonCall(kid, subject, JSONObject().put("action", "list")) { code, r ->
         if (code != 200 || r == null) return@lessonCall tutorError(kid, subject, code)
         val arr = r.getJSONArray("lessons")
-        if (arr.length() == 0) add(ui.card().apply { addView(ui.text("هنوز درسی نساخته‌ای. با عکس صفحه‌ی اول درس شروع کن.", 15f, Pal.MUTED)) })
+        if (arr.length() == 0) add(ui.card().apply { addView(ui.text(if (isFree()) "هنوز جلسه‌ای نساخته‌ای. از صفحه‌ی اول کتاب یا جزوه‌ی کلاست عکس بگیر." else "هنوز درسی نساخته‌ای. با عکس صفحه‌ی اول درس شروع کن.", 15f, Pal.MUTED)) })
         for (i in 0 until arr.length()) {
             val l = arr.getJSONObject(i)
             val secs = l.getJSONArray("sections")
@@ -63,10 +58,17 @@ private fun MainActivity.tutorLessonsUnsafe(kid: Kid, subject: String) {
 }
 
 fun MainActivity.tutorNewLesson(kid: Kid, subject: String) {
-    goTo { tutorNewLesson(kid, subject) }
+    keepScreen { tutorNewLesson(kid, subject) }
     TutorState.subject = subject; TutorState.kidId = kid.id; TutorState.lessonId = ""
-    box.removeAllViews()
+    clearTutor()
     tutorBack(kid)
+    if (isFree()) {
+        // Free classes have no school-book QR (and the QR sites are school sites), so only the photo.
+        add(ui.text("➕ جلسه‌ی جدید", 24f, Pal.INK, true))
+        add(ui.card().apply { addView(ui.text("از صفحه‌ی اول کتاب یا جزوه‌ی کلاست عکس بگیر؛ همان‌جا که موضوع‌های جلسه نوشته شده. من عنوان و بخش‌ها را می‌خوانم.", 15f)) })
+        add(ui.pill("📷 عکس کتاب یا جزوه", Pal.ORANGE) { takePhoto("lessonpage", "") })
+        return
+    }
     add(ui.text("➕ درس جدید", 24f, Pal.INK, true))
     add(ui.card().apply {
         addView(ui.text("۱) از صفحه‌ی اول درس عکس بگیر؛ همان‌جا که نوشته این درس چه بخش‌هایی دارد. من عنوان و بخش‌ها را می‌خوانم.", 15f))
@@ -85,9 +87,9 @@ fun MainActivity.tutorOpenLesson(kid: Kid, subject: String, lessonId: String) {
 fun MainActivity.tutorLessonHub(kid: Kid, subject: String, lesson: JSONObject) = safely("tutorLessonHub") { tutorLessonHubUnsafe(kid, subject, lesson) }
 
 private fun MainActivity.tutorLessonHubUnsafe(kid: Kid, subject: String, lesson: JSONObject) {
-    goTo { tutorLessonHub(kid, subject, lesson) }
+    keepScreen { tutorLessonHub(kid, subject, lesson) }
     TutorState.subject = subject; TutorState.kidId = kid.id; TutorState.lessonId = lesson.getString("id")
-    box.removeAllViews()
+    clearTutor()
     tutorBack(kid)
     val lid = lesson.getString("id")
     val secs = lesson.getJSONArray("sections")
@@ -123,7 +125,7 @@ private fun MainActivity.tutorLessonHubUnsafe(kid: Kid, subject: String, lesson:
         }
     }
     if (hasAudio) add(ui.pill("✏️ دیکته از روی صوت درس", Pal.ORANGE) {
-        lessonCall(kid, subject, JSONObject().put("action", "audio_dictation").put("lesson_id", lid)) { code, r ->
+        lessonCall(kid, subject, JSONObject().put("action", "audio_dictation").put("lesson_id", lid), always = true) { code, r ->
             val msg = when {
                 code == 200 && r?.optString("status") == "review" -> "دیکته ساخته شد (${fa(r.optInt("phrase_count"))} جمله).\nبعد از تایید پدر و مادر شروع می‌شود."
                 code == 200 && r?.optString("status") == "ready" -> "دیکته آماده است! از صفحه‌ی اصلی، بخش دیکته، شروعش کن."
@@ -137,7 +139,7 @@ private fun MainActivity.tutorLessonHubUnsafe(kid: Kid, subject: String, lesson:
             refresh()
         }
     })
-    add(ui.pill("🔳 افزودن QR کتاب به این درس", Pal.MUTED) { takePhoto("qr", "") })
+    if (!isFree()) add(ui.pill("🔳 افزودن QR کتاب به این درس", Pal.MUTED) { takePhoto("qr", "") })
 }
 
 /** Result of making a lesson from a photo or QR; also used when a QR is attached. */

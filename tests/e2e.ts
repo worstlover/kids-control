@@ -187,6 +187,32 @@ t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'explain_done', ex
 t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'explain', text: 'کسر چیست؟', simpler: true }); assert.equal(t.body.title, 'ساده'); ok('tutor: simpler explanation made');
 t = await tuRaw({ kid_id: ali.id, subject: 'english', action: 'explain_done', exercise_id: EXP, understood: true }); assert.equal(t.body.ok, true); ok('tutor: understood -> recorded');
 assert.equal((await tuRaw({ kid_id: ali.id, subject: 'english', action: 'explain' })).status, 400); ok('tutor: explain needs text or photo');
+t = await tuRaw({ kid_id: ali.id, subject: 'English', track: 'free', action: 'profile', goal: 'آموزشگاه زبان' }); assert.equal(t.body.status, 'assess'); ok('tutor: free-class English has its own level test, separate from school English');
+assert.equal((await rest(`/tutor_profiles?kid_id=eq.${ali.id}&subject=eq.free:english`)).length, 1); assert.equal((await rest(`/tutor_profiles?kid_id=eq.${ali.id}&subject=eq.english`))[0].level, 'متوسط'); ok('tutor: free class stored as free:<name>; school profile untouched');
+t = await tuRaw({ kid_id: ali.id, action: 'subjects' }); assert.ok(t.body.school.some((x: any) => x.subject === 'english' && x.level === 'متوسط')); assert.ok(t.body.free.some((x: any) => x.subject === 'english' && x.level === null)); assert.ok(!t.body.school.some((x: any) => x.subject.startsWith('free:'))); ok('tutor: subjects lists school lessons and free classes apart');
+// v5: does the kid really learn it?
+t = await tuRaw({ kid_id: ali.id, subject: 'math', action: 'profile', goal: '' }); const MEX = t.body.exercise_id;
+await tuRaw({ kid_id: ali.id, subject: 'math', action: 'assess_submit', exercise_id: MEX, answers: ['دو', 'چهار', 'شش', 'هشت', 'ده'] });
+t = await tuRaw({ kid_id: ali.id, subject: 'math', action: 'explain', text: 'کسر چیست؟' }); const BX = t.body.exercise_id;
+assert.ok(t.body.concept); assert.ok(t.body.steps.every((x: any) => !('a' in x))); ok('board: lesson has a concept; expected answers never sent to the phone');
+const bal1 = (await rest(`/kid_balance?kid_id=eq.${ali.id}`))[0].points;
+t = await tuRaw({ kid_id: ali.id, subject: 'math', action: 'step_answer', exercise_id: BX, step: 0, answer: 'نمی‌دانم' });
+assert.equal(t.body.correct, false); assert.ok(t.body.reexplain.say); assert.ok(!/script/.test(JSON.stringify(t.body))); ok('board: wrong answer -> same step explained another way (drawing cleaned)');
+t = await tuRaw({ kid_id: ali.id, subject: 'math', action: 'step_answer', exercise_id: BX, step: 0, answer: 'درست' });
+assert.equal(t.body.correct, true); assert.equal(t.body.points, 0); ok('board: right after a hint -> no points');
+assert.equal((await rest(`/kid_balance?kid_id=eq.${ali.id}`))[0].points, bal1); ok('board: no points for answers after help');
+assert.equal((await tuRaw({ kid_id: ali.id, subject: 'math', action: 'step_answer', exercise_id: BX, step: 0, answer: '' })).status, 400); ok('board: empty answer rejected');
+t = await tuRaw({ kid_id: ali.id, subject: 'math', action: 'teach_back', exercise_id: BX, text: 'کسر یعنی چند تکه از یک چیز' });
+assert.equal(t.body.passed, true); assert.equal(t.body.points, 3); ok('teach back: kid explains it -> passed, +3');
+t = await tuRaw({ kid_id: ali.id, subject: 'math', action: 'teach_back', exercise_id: BX, text: 'کسر یعنی چند تکه از یک چیز' }); assert.equal(t.body.points, 0); ok('teach back: points only once');
+t = await tuRaw({ kid_id: ali.id, subject: 'math', action: 'exit_ticket', exercise_id: BX }); const EXX = t.body.exercise_id;
+assert.deepEqual(t.body.types, ['apply', 'find_error', 'why']); ok('exit quiz: apply / find the error / why');
+assert.equal((await tuRaw({ kid_id: ali.id, subject: 'math', action: 'exit_ticket', exercise_id: BX })).body.exercise_id, EXX); ok('exit quiz: reused, not made twice');
+t = await tuRaw({ kid_id: ali.id, subject: 'math', action: 'check', exercise_id: EXX, answers: ['e1a', 'x', 'e3a'] });
+assert.equal(t.body.exit, true); assert.equal(t.body.points, 4); assert.equal(t.body.concepts[0].counted, true); assert.equal(t.body.concepts[0].moved, 1); ok('exit quiz: 2/3 -> concept moves up, double points for first-try answers');
+const cpt = (await rest(`/tutor_concepts?kid_id=eq.${ali.id}&subject=eq.math`)); assert.ok(cpt.some((c: any) => c.stage === 1 && c.hints >= 1)); ok('concepts: stage, review day and help counts saved');
+t = await tuRaw({ kid_id: ali.id, subject: 'math', action: 'review' }); assert.equal(t.body.none, true); ok('review: nothing due today');
+t = await tuRaw({ kid_id: ali.id, subject: 'math', action: 'concepts' }); assert.ok(t.body.concepts.length >= 1); assert.equal(t.body.due, 0); ok('concepts: listed for the kid');
 
 console.log('penalties on the phone');
 const [prule] = await rest('/penalty_rules', 'POST', [{ kid_id: ali.id, title: 'تست جریمه', points: 2 }]);

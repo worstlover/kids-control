@@ -14,9 +14,15 @@ import kotlin.concurrent.thread
 /** Which kid and subject the tutor is working with (survives screen redraws). */
 object TutorState {
     @Volatile var subject = ""
+    @Volatile var track = SCHOOL                                  // SCHOOL lesson (textbook) or FREE class (after-school)
+    @Volatile var gen = 0                                         // bumped on every screen change; late replies for an old screen are dropped
     @Volatile var kidId = ""
     @Volatile var lessonId = ""                                   // lesson a book QR / photo should attach to ("" = make a new lesson)
     val drafts = java.util.concurrent.ConcurrentHashMap<String, List<String>>()   // answers typed so far, per exercise
+    val boards = java.util.concurrent.ConcurrentHashMap<String, BoardProgress>()  // where the kid is on each blackboard lesson
+    @Volatile var muted = false                                   // teacher's voice off
+    @Volatile var solutionLesson: String? = null                  // lesson to go back to after a photo of a worked solution
+    @Volatile var onSpeech: ((String) -> Unit)? = null            // where the text from the 🎤 button goes
 }
 
 /** Reads text aloud with the phone's text-to-speech engine, Persian voice if it has one. */
@@ -29,6 +35,7 @@ class Speaker(ctx: Context) {
             if (ready) {
                 val r = tts?.setLanguage(Locale("fa", "IR"))
                 if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) tts?.setLanguage(Locale.getDefault())
+                tts?.setSpeechRate(0.9f)                          // a little slower: it is a teacher talking to a kid
             }
         }
     }
@@ -41,10 +48,38 @@ class Speaker(ctx: Context) {
     fun shutdown() { tts?.shutdown(); tts = null }
 }
 
-private val SUBJECTS = listOf("انگلیسی" to "english", "ریاضی" to "math", "فارسی" to "persian", "علوم" to "science")
+const val SCHOOL = "school"
+const val FREE = "free"
 
-/** Switch the tutor to a screen and remember it, so a redraw shows the same screen. */
+/** School lessons follow the textbook (photo of the page, book QR). Keys are what the server stores. */
+private val SCHOOL_SUBJECTS = listOf("🔤 انگلیسی" to "english", "➗ ریاضی" to "math", "📝 فارسی" to "persian", "🔬 علوم" to "science")
+/** Free (after-school) classes: the tutor follows the kid's goal, not the school book. Kept apart from school lessons on the server. */
+private val FREE_CLASSES = listOf(
+    "🗣 زبان انگلیسی (آموزشگاه)" to "english", "💻 برنامه‌نویسی" to "برنامه‌نویسی", "♟ شطرنج" to "شطرنج",
+    "🎸 موسیقی" to "موسیقی", "🎨 نقاشی" to "نقاشی", "🧠 محاسبات ذهنی" to "محاسبات ذهنی",
+)
+
+fun isFree() = TutorState.track == FREE
+
+/** Name shown to the kid for a subject key, e.g. "math" -> "➗ ریاضی", "شطرنج" (free) -> "♟ شطرنج". */
+fun subjectLabel(key: String, track: String = TutorState.track): String =
+    (if (track == FREE) FREE_CLASSES else SCHOOL_SUBJECTS).firstOrNull { it.second == key }?.first ?: key
+
+/** "🏫 مدرسه · ➗ ریاضی" or "🎨 کلاس آزاد · ♟ شطرنج" — so the kid always sees which kind of class this is. */
+fun subjectTitle(key: String) = (if (isFree()) "🎨 کلاس آزاد · " else "🏫 مدرسه · ") + subjectLabel(key)
+
+/**
+ * Remember the screen that is being drawn, so a redraw (render() after a sync, onResume…) shows it again.
+ * It does NOT draw. Screens call this on themselves.
+ * (Calling goTo here was the force close: goTo draws the screen, which called goTo again, forever -> StackOverflowError.)
+ */
+fun MainActivity.keepScreen(screen: () -> Unit) { tutorView = screen }
+
+/** Jump to ANOTHER screen: remember it and draw it. A screen must never goTo itself (use keepScreen). */
 fun MainActivity.goTo(screen: () -> Unit) { tutorView = screen; screen() }
+
+/** Start drawing a new tutor screen. Replies still on their way for the previous screen are ignored. */
+fun MainActivity.clearTutor() { TutorState.gen++; speaker.stop(); box.removeAllViews() }
 
 fun MainActivity.tutorBack(kid: Kid) = add(ui.pill("← درس‌ها", Pal.MUTED) { goTo { tutorHome(kid) } })
 
@@ -56,44 +91,95 @@ internal inline fun MainActivity.safely(what: String, block: () -> Unit) {
     }
 }
 
-/** Every tutor request runs in the background; the result is handled on the UI thread. */
-fun MainActivity.tutorCall(kid: Kid, body: JSONObject, then: (Int, JSONObject?) -> Unit) {
-    body.put("kid_id", kid.id).put("day", Sync.today())
+/**
+ * Every tutor request runs in the background; the result is handled on the UI thread.
+ * A reply that comes back after the kid moved to another screen is dropped (it used to be drawn on top of the new screen).
+ * [always] = the reply should still be shown if the kid is anywhere in the tutor (results of "send answers" and the like).
+ */
+fun MainActivity.tutorCall(kid: Kid, body: JSONObject, always: Boolean = false, then: (Int, JSONObject?) -> Unit) {
+    body.put("kid_id", kid.id).put("day", Sync.today()).put("track", TutorState.track)
+    val gen = TutorState.gen
     thread {
         // Never let a bad/partial reply from the server crash the app.
         val (code, r) = try { Sync.tutor(prefs, body) } catch (e: Exception) { Pair(-1, null) }
-        runOnUiThread {
-            try { then(code, r) }
-            catch (e: Exception) {
-                android.util.Log.e("tutor", "unexpected reply shape", e)
-                toast("جواب معلم کامل نبود؛ دوباره امتحان کن 🔄")
-            }
-        }
+        runOnUiThread { deliver(gen, always) { then(code, r) } }
+    }
+}
+
+/** Runs a reply handler only if it still belongs on screen, and never lets it close the app. */
+internal fun MainActivity.deliver(gen: Int, always: Boolean, block: () -> Unit) {
+    if (isFinishing || isDestroyed) return
+    if (tutorView == null) return                          // kid left the tutor; don't draw on the home screen
+    if (!always && gen != TutorState.gen) return           // an older screen's reply
+    try { block() }
+    catch (e: Exception) {
+        android.util.Log.e("tutor", "unexpected reply shape", e)
+        toast("جواب معلم کامل نبود؛ دوباره امتحان کن 🔄")
     }
 }
 
 fun MainActivity.tutorHome(kid: Kid) {
     TutorState.kidId = kid.id
-    box.removeAllViews()
+    tutorView = { tutorHome(kid) }
+    clearTutor()
     add(ui.pill("← بازگشت", Pal.MUTED) { tutorView = null; render() })
     add(ui.text("🎓 معلم من", 26f, Pal.INK, true))
-    add(ui.text("یک درس انتخاب کن. اول معلم سطحت را می‌سنجد، بعد برایت برنامه‌ی روزانه می‌نویسد.", 15f, Pal.MUTED))
-    SUBJECTS.forEach { (label, key) -> add(ui.pill(label, Pal.PURPLE) { tutorIntro(kid, key) }) }
+    add(ui.text("اول معلم سطحت را می‌سنجد، بعد برایت برنامه‌ی روزانه می‌نویسد. درس‌های مدرسه و کلاس‌های آزاد جدا از هم پیش می‌روند.", 15f, Pal.MUTED))
+
+    val school = trackSection(kid, SCHOOL, "🏫 درس‌های مدرسه", "طبق کتاب درسی؛ با عکس صفحه و QR کتاب", Pal.BLUE,
+        SCHOOL_SUBJECTS, "درس دیگر مدرسه، مثلاً عربی یا مطالعات")
+    val free = trackSection(kid, FREE, "🎨 کلاس‌های آزاد", "بیرون از مدرسه: زبان، کدنویسی، موسیقی، شطرنج…؛ طبق هدف خودت", Pal.ORANGE,
+        FREE_CLASSES, "کلاس دیگر، مثلاً گیتار یا رباتیک")
+
+    // Classes the kid already started (with their level) — best effort, the screen works without it.
+    tutorCall(kid, JSONObject().put("action", "subjects")) { code, r ->
+        if (code != 200 || r == null) return@tutorCall
+        school.fill(r.optJSONArray("school"))
+        free.fill(r.optJSONArray("free"))
+    }
+}
+
+/** One of the two blocks on the tutor home: preset subjects, the kid's own ones (added when the server answers), and a "start another" box. */
+private class TrackSection(val track: String, val presets: Map<String, android.widget.TextView>, val mine: LinearLayout, val onPick: (String) -> Unit, val color: Int, val ui: Ui) {
+    fun fill(arr: JSONArray?) {
+        if (arr == null) return
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val key = o.optString("subject").takeIf { it.isNotEmpty() } ?: continue
+            val level = if (o.isNull("level")) "" else o.optString("level")
+            val tail = if (level.isEmpty()) "  ⏳ تعیین سطح" else "  · سطح: $level"
+            val preset = presets[key]
+            if (preset != null) preset.text = subjectLabel(key, track) + tail
+            else mine.addView(ui.pill(subjectLabel(key, track) + tail, color) { onPick(key) })
+        }
+    }
+}
+
+private fun MainActivity.trackSection(kid: Kid, track: String, title: String, sub: String, color: Int,
+                                      presets: List<Pair<String, String>>, hint: String): TrackSection {
+    val pick: (String) -> Unit = { key -> TutorState.track = track; tutorIntro(kid, key) }
+    add(ui.title(title))
+    add(ui.text(sub, 14f, Pal.MUTED))
+    val pills = LinkedHashMap<String, android.widget.TextView>()
+    presets.forEach { (label, key) -> val p = ui.pill(label, color) { pick(key) }; pills[key] = p; add(p) }
+    val mine = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+    add(mine)
     val c = ui.card()
-    val other = field("درس دیگر، مثلاً گیتار یا کدنویسی")
+    val other = field(hint)
     c.addView(other)
-    c.addView(ui.pill("شروع", Pal.GREEN) { val s = other.text.toString().trim(); if (s.isNotEmpty()) tutorIntro(kid, s) })
+    c.addView(ui.pill("شروع", Pal.GREEN) { val s = other.text.toString().trim().lowercase(); if (s.isNotEmpty()) pick(s) })
     add(c)
+    return TrackSection(track, pills, mine, pick, color, ui)
 }
 
 fun MainActivity.tutorIntro(kid: Kid, subject: String) {
     TutorState.subject = subject
-    goTo { tutorIntro(kid, subject) }
-    box.removeAllViews()
+    keepScreen { tutorIntro(kid, subject) }
+    clearTutor()
     tutorBack(kid)
-    add(ui.text("📚 $subject", 24f, Pal.INK, true))
+    add(ui.text(subjectTitle(subject), 24f, Pal.INK, true))
     val c = ui.card()
-    val goal = field("هدفت از این درس چیست؟ مثلاً: برای سفر بتوانم حرف بزنم")
+    val goal = field(if (isFree()) "هدفت از این کلاس چیست؟ مثلاً: بتوانم یک آهنگ ساده بزنم" else "هدفت از این درس چیست؟ مثلاً: امتحان این ترم را خوب بدهم")
     c.addView(goal)
     c.addView(ui.pill("▶ شروع", Pal.GREEN) { tutorStart(kid, subject, goal.text.toString().trim()) })
     add(c)
@@ -101,7 +187,8 @@ fun MainActivity.tutorIntro(kid: Kid, subject: String) {
 
 fun MainActivity.tutorStart(kid: Kid, subject: String, goal: String) {
     TutorState.subject = subject
-    box.removeAllViews()
+    keepScreen { tutorStart(kid, subject, "") }            // a redraw asks again (cheap: the server reuses the open level test)
+    clearTutor()
     tutorBack(kid)
     add(ui.card().apply { addView(ui.text("⏳ معلمت دارد آماده می‌شود…", 16f)) })
     tutorCall(kid, JSONObject().put("action", "profile").put("subject", subject).put("goal", goal)) { code, r ->
@@ -114,7 +201,7 @@ fun MainActivity.tutorStart(kid: Kid, subject: String, goal: String) {
 }
 
 fun MainActivity.tutorError(kid: Kid, subject: String, code: Int) {
-    box.removeAllViews()
+    clearTutor()
     tutorBack(kid)
     val msg = when (code) {
         429 -> "امروز به سقف تمرین‌های معلم رسیدی؛ فردا دوباره 🌙"
@@ -127,13 +214,16 @@ fun MainActivity.tutorError(kid: Kid, subject: String, code: Int) {
 }
 
 /** Questions with a text box each. Typed answers are kept (here and on the server) so an error never loses them. */
-private fun MainActivity.questionCards(kid: Kid, subject: String, exId: String, qs: JSONArray, draft: JSONArray?): List<EditText> {
+private val QUESTION_TYPES = mapOf("apply" to "🔧 به‌کار ببر", "find_error" to "🔍 اشتباه را پیدا کن", "why" to "❓ چرا؟")
+
+private fun MainActivity.questionCards(kid: Kid, subject: String, exId: String, qs: JSONArray, draft: JSONArray?, types: JSONArray? = null): List<EditText> {
     val fields = ArrayList<EditText>()
     val saved = TutorState.drafts[exId] ?: draft?.let { d -> (0 until d.length()).map { d.getString(it) } } ?: emptyList()
     val handler = android.os.Handler(android.os.Looper.getMainLooper())
     var pending: Runnable? = null
     for (i in 0 until qs.length()) {
         val c = ui.card()
+        QUESTION_TYPES[types?.optString(i)]?.let { c.addView(ui.chip(it, Pal.PURPLE)) }
         c.addView(ui.text("${fa(i + 1)}. ${qs.getString(i)}", 17f, Pal.INK, true))
         val f = field("جوابت", value = saved.getOrElse(i) { "" })
         fields.add(f)
@@ -145,7 +235,7 @@ private fun MainActivity.questionCards(kid: Kid, subject: String, exId: String, 
                 TutorState.drafts[exId] = now
                 pending?.let { handler.removeCallbacks(it) }
                 pending = Runnable {
-                    val body = JSONObject().put("action", "draft").put("subject", subject).put("exercise_id", exId).put("answers", JSONArray(now)).put("kid_id", kid.id).put("day", Sync.today())
+                    val body = JSONObject().put("action", "draft").put("subject", subject).put("exercise_id", exId).put("answers", JSONArray(now)).put("kid_id", kid.id).put("day", Sync.today()).put("track", TutorState.track)
                     thread { Sync.tutor(prefs, body) }          // best effort; the local copy is already safe
                 }
                 handler.postDelayed(pending!!, 1500)
@@ -158,7 +248,7 @@ private fun MainActivity.questionCards(kid: Kid, subject: String, exId: String, 
 }
 
 fun MainActivity.tutorAssess(kid: Kid, subject: String, r: JSONObject) {
-    box.removeAllViews()
+    clearTutor()
     tutorBack(kid)
     add(ui.text("📝 اول ببینیم از کجا شروع کنیم", 22f, Pal.INK, true))
     add(ui.text("به این سوال‌ها جواب بده. اشتباه کردن اشکالی ندارد؛ فقط برای این است که بفهمم کجا کمک لازم داری.", 15f, Pal.MUTED))
@@ -166,7 +256,7 @@ fun MainActivity.tutorAssess(kid: Kid, subject: String, r: JSONObject) {
     val fields = questionCards(kid, subject, exId, r.getJSONArray("questions"), r.optJSONArray("draft"))
     add(ui.pill("✅ ارسال جواب‌ها", Pal.GREEN) {
         val answers = JSONArray(fields.map { it.text.toString().trim() })
-        tutorCall(kid, JSONObject().put("action", "assess_submit").put("subject", subject).put("exercise_id", exId).put("answers", answers)) { code, res ->
+        tutorCall(kid, JSONObject().put("action", "assess_submit").put("subject", subject).put("exercise_id", exId).put("answers", answers), always = true) { code, res ->
             if (code == 200 && res != null) { TutorState.drafts.remove(exId); tutorResultCard(kid, subject, res) }
             else toast(if (code == 429) "امروز دیگه بسه 🌙" else "ارسال نشد، ولی جواب‌هایت ذخیره است. دوباره بفرست 🔄")
         }
@@ -174,7 +264,8 @@ fun MainActivity.tutorAssess(kid: Kid, subject: String, r: JSONObject) {
 }
 
 fun MainActivity.tutorResultCard(kid: Kid, subject: String, res: JSONObject) {
-    box.removeAllViews()
+    keepScreen { tutorResultCard(kid, subject, res) }
+    clearTutor()
     tutorBack(kid)
     add(ui.text("🎉 سطحت: ${res.optString("level")}", 26f, Pal.PURPLE, true))
     add(ui.card().apply { addView(ui.text(res.optString("feedback"), 17f)) })
@@ -182,32 +273,38 @@ fun MainActivity.tutorResultCard(kid: Kid, subject: String, res: JSONObject) {
 }
 
 fun MainActivity.tutorHub(kid: Kid, subject: String, r: JSONObject) {
-    goTo { tutorHub(kid, subject, r) }
+    keepScreen { tutorStart(kid, subject, "") }            // a redraw re-reads the profile, so "continue" buttons are never stale
     TutorState.subject = subject; TutorState.lessonId = ""
-    box.removeAllViews()
+    clearTutor()
     tutorBack(kid)
-    add(ui.text("📚 $subject · سطح: ${r.optString("level")}", 22f, Pal.INK, true))
+    add(ui.text("${subjectTitle(subject)} · سطح: ${r.optString("level")}", 22f, Pal.INK, true))
     if (r.optString("goal").isNotEmpty()) add(ui.text("🎯 هدف: ${r.optString("goal")}", 15f, Pal.MUTED))
     r.optJSONObject("open_practice")?.let { op ->
         add(ui.pill("▶ ادامه‌ی تمرین نیمه‌تمام", Pal.ORANGE) {
-            tutorPracticeScreen(kid, subject, op.optString("lesson_id").takeIf { it.isNotEmpty() && it != "null" }, op, "")
+            tutorPracticeScreen(kid, subject, op.optString("lesson_id").takeIf { it.isNotEmpty() && it != "null" }, op,
+                if (op.optBoolean("exit")) "🚪 آزمون خروج" else if (op.optBoolean("review")) "🔁 مرور" else "")
         })
     }
     r.optJSONObject("last_lesson")?.let { ll ->
         add(ui.pill("📖 ادامه‌ی درس: ${ll.optString("title")} (${fa(ll.optInt("done"))} از ${fa(ll.optInt("total"))} بخش)", Pal.PURPLE) { tutorOpenLesson(kid, subject, ll.optString("id")) })
     }
+    val due = r.optInt("reviews_due")
+    if (due > 0) add(ui.pill("🔁 مرور امروز: ${fa(due)} مفهوم (تا یادت نرود)", Pal.ORANGE) { tutorReview(kid, subject) })
     add(ui.pill("📅 برنامه‌ی امروز", Pal.PURPLE) { tutorPlan(kid, subject) })
-    add(ui.pill("📖 درس‌های من (کتاب، فیلم، صوت)", Pal.BLUE) { tutorLessons(kid, subject) })
+    add(ui.pill(if (isFree()) "📖 جلسه‌های من (از روی کتاب یا جزوه‌ی کلاس)" else "📖 درس‌های من (کتاب، فیلم، صوت)", Pal.BLUE) { tutorLessons(kid, subject) })
     add(ui.pill("💡 توضیح یک موضوع یا صفحه", Pal.ORANGE) { tutorExplain(kid, subject, "") })
     add(ui.pill("🎯 تمرین سریع", Pal.BLUE) { tutorPractice(kid, subject, "") })
+    val cc = r.optJSONObject("concept_counts")
+    val known = (cc?.optInt("learned") ?: 0) + (cc?.optInt("solid") ?: 0)
+    add(ui.pill("🧠 چیزهایی که یاد گرفتم" + (if (cc != null) " (${fa(known)} یاد گرفته · ${fa(cc.optInt("practicing"))} در حال تمرین)" else ""), Pal.GREEN) { tutorConcepts(kid, subject) })
     add(ui.pill("📜 سابقه‌ی من", Pal.MUTED) { tutorHistory(kid, subject) })
 }
 
 fun MainActivity.tutorPlan(kid: Kid, subject: String) = safely("tutorPlan") { tutorPlanUnsafe(kid, subject) }
 
 private fun MainActivity.tutorPlanUnsafe(kid: Kid, subject: String) {
-    goTo { tutorPlan(kid, subject) }
-    box.removeAllViews()
+    keepScreen { tutorPlan(kid, subject) }
+    clearTutor()
     tutorBack(kid)
     add(ui.text("📅 برنامه‌ی امروز", 22f, Pal.INK, true))
     tutorCall(kid, JSONObject().put("action", "plan").put("subject", subject)) { code, r ->
@@ -220,18 +317,21 @@ private fun MainActivity.tutorPlanUnsafe(kid: Kid, subject: String) {
                 addView(ui.text("${fa(i + 1)}. ${item.optString("title")}", 18f, Pal.INK, true))
                 addView(ui.text("حدود ${fa(item.optInt("minutes", 5))} دقیقه", 14f, Pal.MUTED))
             })
-            val label = if (type == "explain") "📖 بریم توضیح بگیریم" else "✏️ شروع"
+            val label = when (type) { "explain" -> "🖍 بریم پای تخته"; "review" -> "🔁 مرور"; else -> "✏️ شروع" }
             add(ui.pill(label, Pal.PURPLE) {
-                if (type == "explain") tutorExplain(kid, subject, item.optString("title"))
-                else tutorPractice(kid, subject, item.optString("title"))
+                when (type) {
+                    "explain" -> tutorExplainCall(kid, subject, item.optString("title"), false)
+                    "review" -> tutorReview(kid, subject, item.optString("title"))
+                    else -> tutorPractice(kid, subject, item.optString("title"))
+                }
             })
         }
     }
 }
 
 fun MainActivity.tutorPractice(kid: Kid, subject: String, topic: String, lessonId: String? = null, section: Int? = null) {
-    goTo { tutorPractice(kid, subject, topic, lessonId, section) }
-    box.removeAllViews()
+    keepScreen { tutorPractice(kid, subject, topic, lessonId, section) }
+    clearTutor()
     tutorBack(kid)
     add(ui.text("🎯 تمرین" + (if (topic.isEmpty()) "" else " · $topic"), 22f, Pal.INK, true))
     add(ui.text("⏳ سوال‌ها دارند آماده می‌شوند…", 15f, Pal.MUTED))
@@ -248,17 +348,26 @@ fun MainActivity.tutorPractice(kid: Kid, subject: String, topic: String, lessonI
 fun MainActivity.tutorPracticeScreen(kid: Kid, subject: String, lessonId: String?, r: JSONObject, topic: String) = safely("tutorPracticeScreen") { tutorPracticeScreenUnsafe(kid, subject, lessonId, r, topic) }
 
 private fun MainActivity.tutorPracticeScreenUnsafe(kid: Kid, subject: String, lessonId: String?, r: JSONObject, topic: String) {
-    goTo { tutorPracticeScreen(kid, subject, lessonId, r, topic) }
-    box.removeAllViews()
+    keepScreen { tutorPracticeScreen(kid, subject, lessonId, r, topic) }
+    clearTutor()
     tutorBack(kid)
-    add(ui.text("🎯 تمرین" + (if (topic.isEmpty()) "" else " · $topic"), 22f, Pal.INK, true))
+    val heading = if (topic.startsWith("🚪") || topic.startsWith("🔁")) topic else "🎯 تمرین" + (if (topic.isEmpty()) "" else " · $topic")
+    add(ui.text(heading, 22f, Pal.INK, true))
+    if (r.optBoolean("exit")) add(ui.text("سه سوال کوتاه که نشان می‌دهد واقعاً فهمیدی، نه فقط حفظ کردی. جواب درست بار اول، امتیاز دوبرابر دارد.", 15f, Pal.MUTED))
+    if (r.optBoolean("review")) add(ui.text("این‌ها را قبلاً یاد گرفتی؛ ببینیم هنوز یادت هست؟ اگر یادت بود، یک پله محکم‌تر می‌شود.", 15f, Pal.MUTED))
     if (r.optBoolean("resumed")) add(ui.text("این تمرین را قبلاً شروع کرده بودی؛ ادامه بده.", 14f, Pal.MUTED))
     val exId = r.getString("exercise_id")
-    val fields = questionCards(kid, subject, exId, r.getJSONArray("questions"), r.optJSONArray("draft"))
+    val fields = questionCards(kid, subject, exId, r.getJSONArray("questions"), r.optJSONArray("draft"), r.optJSONArray("types"))
     val lid = lessonId ?: r.optString("lesson_id").takeIf { it.isNotEmpty() && it != "null" }
+    add(ui.pill("📷 راه‌حلم را روی کاغذ نوشتم (عکس بگیر)", Pal.BLUE) {
+        // Typed answers (if any) go too; the teacher reads the rest from the photo and checks each step.
+        TutorState.drafts[exId] = fields.map { it.text.toString() }
+        TutorState.kidId = kid.id; TutorState.subject = subject; TutorState.solutionLesson = lid
+        takePhoto("solution", exId)
+    })
     add(ui.pill("📤 تحویل بده", Pal.GREEN) {
         val answers = JSONArray(fields.map { it.text.toString().trim() })
-        tutorCall(kid, JSONObject().put("action", "check").put("subject", subject).put("exercise_id", exId).put("answers", answers)) { c2, res ->
+        tutorCall(kid, JSONObject().put("action", "check").put("subject", subject).put("exercise_id", exId).put("answers", answers), always = true) { c2, res ->
             if (c2 == 200 && res != null) { TutorState.drafts.remove(exId); tutorChecked(kid, subject, res, lid) }
             else toast(if (c2 == 409) "این تمرین قبلاً چک شده" else "معلم الان جواب نداد، ولی جواب‌هایت ذخیره است. دوباره «تحویل بده» را بزن 🔄")
         }
@@ -266,12 +375,19 @@ private fun MainActivity.tutorPracticeScreenUnsafe(kid: Kid, subject: String, le
 }
 
 fun MainActivity.tutorChecked(kid: Kid, subject: String, res: JSONObject, lessonId: String? = null) {
-    box.removeAllViews()
+    keepScreen { tutorChecked(kid, subject, res, lessonId) }
+    clearTutor()
     tutorBack(kid)
     val score = res.optInt("score")
     val total = res.optInt("total", 5)
     add(ui.text(if (score * 5 >= total * 4) "🏆 عالی! ${fa(score)} از ${fa(total)}" else "💪 ${fa(score)} از ${fa(total)}؛ داری خوب پیش می‌ری", 22f, Pal.PURPLE, true))
-    if (score > 0) add(ui.chip("+${fa(score)} امتیاز 🪙", Pal.YELLOW, Pal.INK))
+    val points = if (res.has("points")) res.optInt("points") else score
+    if (points > 0) add(ui.chip("+${fa(points)} امتیاز 🪙", Pal.YELLOW, Pal.INK))
+    when (res.optString("level_changed")) {
+        "up" -> add(ui.card().apply { addView(ui.text("🚀 سطحت رفت بالا: ${res.optString("level")}", 18f, Pal.GREEN, true)) })
+        "down" -> add(ui.card().apply { addView(ui.text("سطح را کمی ساده‌تر کردم تا محکم‌تر جلو برویم: ${res.optString("level")}", 16f, Pal.INK)) })
+    }
+    conceptProgress(res.optJSONArray("concepts"))
     val results = res.optJSONArray("results") ?: JSONArray()
     for (i in 0 until results.length()) {
         val rr = results.getJSONObject(i)
@@ -292,10 +408,10 @@ fun MainActivity.tutorChecked(kid: Kid, subject: String, res: JSONObject, lesson
 fun MainActivity.tutorHistory(kid: Kid, subject: String) = safely("tutorHistory") { tutorHistoryUnsafe(kid, subject) }
 
 private fun MainActivity.tutorHistoryUnsafe(kid: Kid, subject: String) {
-    goTo { tutorHistory(kid, subject) }
-    box.removeAllViews()
+    keepScreen { tutorHistory(kid, subject) }
+    clearTutor()
     tutorBack(kid)
-    add(ui.text("📜 سابقه‌ی من · $subject", 22f, Pal.INK, true))
+    add(ui.text("📜 سابقه‌ی من · ${subjectLabel(subject)}", 22f, Pal.INK, true))
     tutorCall(kid, JSONObject().put("action", "history").put("subject", subject)) { code, r ->
         if (code != 200 || r == null) return@tutorCall tutorError(kid, subject, code)
         val lessons = r.getJSONArray("lessons")
@@ -312,10 +428,15 @@ private fun MainActivity.tutorHistoryUnsafe(kid: Kid, subject: String) {
         if (items.length() == 0) add(ui.card().apply { addView(ui.text("هنوز چیزی انجام نداده‌ای.", 15f, Pal.MUTED)) })
         for (i in 0 until items.length()) {
             val it = items.getJSONObject(i)
-            val kind = when (it.getString("kind")) { "assessment" -> "📝 تعیین سطح"; "practice" -> "🎯 تمرین"; else -> "💡 توضیح" }
+            val kind = when {
+                it.optString("mode") == "exit" -> "🚪 آزمون خروج"
+                it.optString("mode") == "review" -> "🔁 مرور"
+                else -> when (it.getString("kind")) { "assessment" -> "📝 تعیین سطح"; "practice" -> "🎯 تمرین"; else -> "🖍 تخته" }
+            } + (if (it.isNull("title") || it.optString("title").isEmpty()) "" else " «${it.optString("title")}»")
             val tail = when {
-                it.getString("status") == "open" -> "نیمه‌تمام ⏳"
-                !it.isNull("score") -> "نمره: ${fa(it.getInt("score"))}"
+                !it.isNull("teach") -> "یاد دادی: ${fa(it.getInt("teach"))} از ۱۰۰"
+                it.getString("status") == "open" && it.getString("kind") != "explain" -> "نیمه‌تمام ⏳"
+                !it.isNull("score") -> "نمره: ${fa(it.getInt("score"))}" + (if (it.isNull("total")) "" else " از ${fa(it.getInt("total"))}")
                 !it.isNull("understood") -> if (it.getBoolean("understood")) "فهمیدم ✅" else "نفهمیدم 🤔"
                 else -> ""
             }
@@ -325,8 +446,8 @@ private fun MainActivity.tutorHistoryUnsafe(kid: Kid, subject: String) {
 }
 
 fun MainActivity.tutorExplain(kid: Kid, subject: String, prefill: String) {
-    goTo { tutorExplain(kid, subject, prefill) }
-    box.removeAllViews()
+    keepScreen { tutorExplain(kid, subject, prefill) }
+    clearTutor()
     tutorBack(kid)
     add(ui.text("📖 چی را توضیح بدم؟", 22f, Pal.INK, true))
     add(ui.text("اسم موضوع را بنویس یا از کتاب عکس بگیر. معلم قدم‌به‌قدم روی تخته توضیح می‌دهد.", 15f, Pal.MUTED))
@@ -338,12 +459,12 @@ fun MainActivity.tutorExplain(kid: Kid, subject: String, prefill: String) {
         if (t.isNotEmpty()) tutorExplainCall(kid, subject, t, false)
     })
     add(c)
-    add(ui.pill("📷 عکس صفحه‌ی کتاب", Pal.ORANGE) { TutorState.kidId = kid.id; takePhoto("tutor", "") })
+    add(ui.pill(if (isFree()) "📷 عکس کتاب یا جزوه‌ی کلاس" else "📷 عکس صفحه‌ی کتاب", Pal.ORANGE) { TutorState.kidId = kid.id; takePhoto("tutor", "") })
 }
 
 fun MainActivity.tutorExplainCall(kid: Kid, subject: String, text: String, simpler: Boolean) {
-    goTo { tutorExplain(kid, subject, text) }
-    box.removeAllViews()
+    keepScreen { tutorExplain(kid, subject, text) }
+    clearTutor()
     tutorBack(kid)
     add(ui.text("⏳ معلم دارد تخته را آماده می‌کند…", 18f, Pal.MUTED, true))
     tutorCall(kid, JSONObject().put("action", "explain").put("subject", subject).put("text", text).put("simpler", simpler)) { code, r ->
@@ -363,63 +484,4 @@ private fun MainActivity.tutorGotExplainUnsafe(code: Int, r: JSONObject?) {
         return toast("عکس خوانده نشد؛ دوباره امتحان کن")
     }
     tutorBoard(kid, subject, r, "")
-}
-
-private fun boardHtml(svg: String): String = """<html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;background:#fff;height:100%;display:flex;align-items:center;justify-content:center;font-family:sans-serif">
-<style>@keyframes pop{from{opacity:0;transform:scale(.85)}to{opacity:1;transform:scale(1)}}
-.b{animation:pop .6s ease-out;width:100%;text-align:center} svg{max-width:100%;height:auto}</style>
-<div class="b">$svg</div></body></html>"""
-
-/** The whiteboard: one step at a time, a drawing, a sentence read aloud, and a check question. */
-fun MainActivity.tutorBoard(kid: Kid, subject: String, r: JSONObject, text: String) = safely("tutorBoard") { tutorBoardUnsafe(kid, subject, r, text) }
-
-private fun MainActivity.tutorBoardUnsafe(kid: Kid, subject: String, r: JSONObject, text: String) {
-    goTo { tutorBoard(kid, subject, r, text) }
-    box.removeAllViews()
-    tutorBack(kid)
-    val steps = r.getJSONArray("steps")
-    val exId = r.getString("exercise_id")
-    add(ui.text("🖍 ${r.optString("title")}", 22f, Pal.INK, true))
-
-    val web = WebView(this).apply {
-        setBackgroundColor(Color.WHITE)
-        layoutParams = LinearLayout.LayoutParams(-1, ui.dp(240))
-    }
-    val counter = ui.text("", 14f, Pal.MUTED)
-    val say = ui.text("", 18f, Pal.INK, true)
-    val ask = ui.text("", 16f, Pal.PURPLE, true)
-    val frame = ui.card()
-    frame.addView(web); frame.addView(counter); frame.addView(say); frame.addView(ask)
-    add(frame)
-
-    var idx = 0
-    fun show() {
-        val s = steps.getJSONObject(idx)
-        web.loadDataWithBaseURL(null, boardHtml(if (s.isNull("board")) "" else s.optString("board")), "text/html", "utf-8", null)
-        counter.text = "قدم ${fa(idx + 1)} از ${fa(steps.length())}"
-        say.text = s.optString("say")
-        ask.text = if (s.isNull("ask") || s.optString("ask").isEmpty()) "" else "❓ ${s.optString("ask")}"
-    }
-    show()
-
-    add(ui.pill("🔊 بشنو", Pal.ORANGE) { if (!speaker.speak(say.text.toString())) toast("صدای گوشی آماده نیست") })
-    val nav = ui.row()
-    nav.addView(ui.pill("⏮ قبلی", Pal.BLUE) { if (idx > 0) { idx--; show() } }
-        .apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = ui.dp(6) } })
-    nav.addView(ui.pill("⏭ بعدی", Pal.BLUE) { if (idx < steps.length() - 1) { idx++; show() } }
-        .apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = ui.dp(6) } })
-    add(nav)
-
-    add(ui.pill("✅ فهمیدم", Pal.GREEN) {
-        tutorCall(kid, JSONObject().put("action", "explain_done").put("subject", subject).put("exercise_id", exId).put("understood", true)) { _, _ ->
-            toast("عالی! 🎉")
-            tutorStart(kid, subject, "")
-        }
-    })
-    add(ui.pill("🤔 نفهمیدم، ساده‌تر بگو", Pal.RED) {
-        tutorCall(kid, JSONObject().put("action", "explain_done").put("subject", subject).put("exercise_id", exId).put("understood", false)) { _, _ ->
-            tutorExplainCall(kid, subject, text.ifEmpty { r.optString("title") }, true)
-        }
-    })
 }

@@ -82,7 +82,7 @@ let rid = 0; // newest render wins (prevents a slow earlier render from overwrit
 async function render() {
   const my = ++rid;
   const kid = st.kids.find(k => k.id === st.kid);
-  const tabs = [['today','امروز'],['tasks','کارها'],['dict','دیکته'],['usage','گزارش'],['points','امتیاز'],['wish','آرزوها'],['apps','برنامه‌ها'],['set','تنظیمات']];
+  const tabs = [['today','امروز'],['tasks','کارها'],['dict','دیکته'],['learn','یادگیری'],['usage','گزارش'],['points','امتیاز'],['wish','آرزوها'],['apps','برنامه‌ها'],['set','تنظیمات']];
   let h = `<div class="tabs">${st.kids.map(k => `<button class="${k.id===st.kid?'on':''}" onclick="st.kid='${k.id}';render()">${esc(k.name)}</button>`).join('')}
     <button class="s" onclick="addKid()">+ فرزند</button></div>`;
   if (!kid) { $('#app').innerHTML = h + '<div class="card">اول یک فرزند اضافه کن.</div>'; return; }
@@ -106,6 +106,42 @@ async function ensureToday(kid) {
 }
 
 const views = {
+  // What the kid really learned with the tutor: concepts that passed spaced reviews, weak spots, recent checks.
+  async learn(kid) {
+    const [{ data: profs }, { data: cs }, { data: ex }] = await Promise.all([
+      sb.from('tutor_profiles').select('subject,level,goal').eq('kid_id', kid.id),
+      sb.from('tutor_concepts').select('*').eq('kid_id', kid.id).order('updated_at', { ascending: false }).limit(300),
+      sb.from('tutor_exercises').select('subject,kind,status,day,prompt,result').eq('kid_id', kid.id).order('created_at', { ascending: false }).limit(60),
+    ]);
+    if (!(profs || []).length) return '<div class="card">هنوز با معلم کار نکرده.</div>';
+    const SUB = { english: 'انگلیسی', math: 'ریاضی', persian: 'فارسی', science: 'علوم' };
+    const nm = s => s.startsWith('free:') ? '🎨 کلاس آزاد · ' + esc(s.slice(5)) : '🏫 مدرسه · ' + esc(SUB[s] || s);
+    const td = today();
+    const order = p => (p.subject.startsWith('free:') ? 1 : 0);
+    return `<div class="card m">هر مفهوم وقتی «یاد گرفته» حساب می‌شود که بعد از آزمون خروج، ۳ روز و یک هفته بعد هم درست جواب داده شود؛ اگر سه هفته بعد هم یادش بود «تثبیت شده» است.</div>` +
+      profs.slice().sort((a, b) => order(a) - order(b)).map(p => {
+        const c = (cs || []).filter(x => x.subject === p.subject);
+        const by = st => c.filter(x => x.status === st);
+        const due = c.filter(x => x.next_review && x.next_review <= td).length;
+        const weak = by('practicing').concat(by('new')).sort((a, b) => (b.hints + b.simpler) - (a.hints + a.simpler)).slice(0, 6);
+        const strong = by('solid').concat(by('learned'));
+        const recent = (ex || []).filter(e => e.subject === p.subject && (e.status === 'checked' || e.result?.teach)).slice(0, 6);
+        const lbl = e => e.prompt?.exit ? '🚪 آزمون خروج' : e.prompt?.review ? '🔁 مرور' : e.kind === 'assessment' ? '📝 تعیین سطح' : e.kind === 'explain' ? '🖍 تخته' : '🎯 تمرین';
+        const res = e => e.result?.teach ? `یاد داد: ${fa(e.result.teach.score)}٪` : e.result?.score != null ? `${fa(e.result.score)} از ${fa(e.prompt?.questions?.length || 5)}` + (e.result.photo ? ' (با عکس راه‌حل)' : '') : '';
+        return `<div class="card"><b>${nm(p.subject)}</b> <span class="m">· سطح: ${esc(p.level || 'هنوز تعیین نشده')}</span>
+          ${p.goal ? `<div class="m">🎯 ${esc(p.goal)}</div>` : ''}
+          <div class="row" style="margin-top:8px;text-align:center">
+            <div><div class="big">${fa(by('solid').length)}</div><div class="m">⭐ تثبیت</div></div>
+            <div><div class="big">${fa(by('learned').length)}</div><div class="m">✅ یاد گرفته</div></div>
+            <div><div class="big">${fa(by('practicing').length + by('new').length)}</div><div class="m">🔄 در تمرین</div></div>
+            <div><div class="big">${fa(due)}</div><div class="m">⏰ مرور امروز</div></div>
+          </div>
+          ${weak.length ? `<div style="margin-top:8px"><b>نیاز به کمک</b>${weak.map(x => `<div class="m">• ${esc(x.name)} — بار اول درست ${fa(x.first_try_correct)} از ${fa(x.attempts)}${x.hints + x.simpler ? ` · ${fa(x.hints + x.simpler)} بار کمک` : ''}</div>`).join('')}</div>` : ''}
+          ${strong.length ? `<div style="margin-top:8px"><b>یاد گرفته</b><div class="m">${strong.map(x => (x.status === 'solid' ? '⭐ ' : '✅ ') + esc(x.name)).join(' · ')}</div></div>` : ''}
+          ${recent.length ? `<div style="margin-top:8px"><b>اخیر</b>${recent.map(e => `<div class="m">${lbl(e)} «${esc(e.prompt?.title || e.prompt?.topic || '')}» · ${esc(e.day)} · ${res(e)}</div>`).join('')}</div>` : ''}
+        </div>`;
+      }).join('');
+  },
   async today(kid) {
     await ensureToday(kid);
     const { data } = await sb.from('task_logs').select('*, tasks(title,points,needs_photo)').eq('kid_id', kid.id).eq('due_date', today());

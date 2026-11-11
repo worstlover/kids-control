@@ -289,6 +289,99 @@ function cleanSegments(raw: unknown, maxSeconds = 3600): { text: string; start: 
   return out.slice(0, 15);
 }
 
+// ---- Tutor: school lessons vs free (after-school) classes ----
+type Track = 'school' | 'free';
+const FREE_PREFIX = 'free:';
+
+/** "free" only when asked for explicitly; anything else (including old phones that send nothing) is a school lesson. */
+function trackOf(v: unknown): Track { return v === 'free' ? 'free' : 'school'; }
+
+/**
+ * The key a subject is stored under. School lessons keep their plain name (so existing data stays where it is);
+ * free classes are stored as "free:<name>", so school English and an English-institute class never share a level or plan.
+ */
+function subjectKey(subject: unknown, track: unknown): string {
+  if (typeof subject !== 'string') return '';
+  let s = subject.trim().toLowerCase();
+  let t = trackOf(track);
+  if (s.startsWith(FREE_PREFIX)) { s = s.slice(FREE_PREFIX.length).trim(); t = 'free'; }
+  s = s.slice(0, 40);
+  if (!s) return '';
+  return t === 'free' ? FREE_PREFIX + s : s;
+}
+
+/** Stored key -> track and the name shown to the kid / the AI. */
+function splitSubject(key: string): { track: Track; name: string } {
+  return key.startsWith(FREE_PREFIX) ? { track: 'free', name: key.slice(FREE_PREFIX.length) } : { track: 'school', name: key };
+}
+
+/** One line for the AI prompts so the teacher behaves differently in school lessons and free classes. */
+function trackHint(track: Track): string {
+  return track === 'free'
+    ? 'نوع کلاس: کلاس آزاد (فوق‌برنامه، بیرون از مدرسه). به کتاب درسی مدرسه وابسته نباش؛ بر اساس هدف بچه یک مسیر عملی، قدم‌به‌قدم و سرگرم‌کننده بچین و مهارت واقعی را تمرین بده.'
+    : 'نوع کلاس: درس مدرسه. مطابق کتاب درسی رسمی مدرسه‌های ایران، با همان ترتیب، اصطلاحات و سطح کتاب پیش برو و برای امتحان مدرسه آماده‌اش کن.';
+}
+
+// ---- Tutor: did the kid really learn it? ----
+function addDays(day: string, n: number): string {
+  const d = new Date(day + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Days until the next review, by stage. Stage 0 = still practicing (again tomorrow); 3 = learned; 4 = solid. */
+const REVIEW_GAPS = [1, 3, 7, 21, 60];
+type ConceptStatus = 'new' | 'practicing' | 'learned' | 'solid';
+type ConceptRow = { stage: number; attempts: number; first_try_correct: number; next_review: string | null };
+
+/** One name per idea, however the AI spells it ("  Fractions " == "fractions"). */
+function conceptKey(s: unknown): string {
+  return typeof s === 'string' ? s.replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 60) : '';
+}
+
+function conceptStatus(stage: number, attempts: number): ConceptStatus {
+  return stage >= 4 ? 'solid' : stage >= 3 ? 'learned' : attempts > 0 ? 'practicing' : 'new';
+}
+
+function isDue(c: { next_review: string | null }, day: string): boolean {
+  return !!c.next_review && c.next_review <= day;
+}
+
+/**
+ * A graded check on one concept: `correct` of `total` questions, all first tries.
+ * It moves the concept up only when the check "counts" — an exit quiz right after the lesson, or a review on/after its due day.
+ * Answering right on the same day again does not count (that is short-term memory). Getting most of it wrong sends it back to the start.
+ */
+function applyConceptResult(c: ConceptRow, correct: number, total: number, day: string, counts: boolean) {
+  const ratio = total > 0 ? correct / total : 0;
+  let stage = Math.max(0, Math.min(4, c.stage | 0));
+  const before = stage;
+  if (total > 0 && ratio < 0.5) stage = 0;
+  else if (ratio >= 2 / 3 && counts) stage = Math.min(4, stage + 1);
+  const attempts = c.attempts + total;
+  const next_review = stage !== before || !c.next_review ? addDays(day, REVIEW_GAPS[stage]) : c.next_review;
+  return { stage, status: conceptStatus(stage, attempts), next_review, attempts, first_try_correct: c.first_try_correct + correct, last_seen: day, moved: stage - before };
+}
+
+const LEVEL_ORDER = ['مبتدی', 'متوسط', 'پیشرفته'];
+/** Level follows the last few graded checks (ratios 0..1, newest last): up when ≥85% on average, down when ≤40%. Needs 3+ checks. */
+function nextLevel(level: string | null, ratios: number[]): string | null {
+  const last = ratios.slice(-5);
+  if (last.length < 3 || !level) return level;
+  const i = LEVEL_ORDER.indexOf(level);
+  if (i < 0) return level;
+  const avg = last.reduce((a, b) => a + b, 0) / last.length;
+  if (avg >= 0.85 - 1e-9 && i < LEVEL_ORDER.length - 1) return LEVEL_ORDER[i + 1];
+  if (avg <= 0.4 + 1e-9 && i > 0) return LEVEL_ORDER[i - 1];
+  return level;
+}
+
+/** Points: right on the first try is worth the most; right after help is worth less; the exit quiz counts double. */
+function answerPoints(correct: boolean, firstTry: boolean, exit = false): number {
+  if (!correct) return 0;
+  return (firstTry ? 1 : 0) * (exit ? 2 : 1);
+}
+
 // ---- shared/common ----
 const cors = {
   'Access-Control-Allow-Origin': '*',

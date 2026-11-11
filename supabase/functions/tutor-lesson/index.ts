@@ -1,7 +1,7 @@
 import { admin, authDevice, cors, json } from '../_shared/common.ts';
 import { extractLesson, transcribeLessonAudio } from '../_shared/ai.ts';
 import { safeFetch, toBase64 } from '../_shared/net.ts';
-import { extractMedia, hostAllowed, isSafePublicUrl, isValidDay, nextSection } from '../_shared/logic.ts';
+import { extractMedia, hostAllowed, isSafePublicUrl, isValidDay, nextSection, splitSubject, subjectKey } from '../_shared/logic.ts';
 
 // deno-lint-ignore-file no-explicit-any
 // Lessons from the textbook: first page photo and/or QR link -> sections + media; progress is remembered.
@@ -40,8 +40,9 @@ Deno.serve(async (req) => {
   }
 });
 
-const subjectOf = (b: any) => typeof b.subject === 'string' ? b.subject.trim().toLowerCase().slice(0, 40) : '';
-const publicLesson = (l: any) => ({ id: l.id, subject: l.subject, title: l.title, sections: l.sections, position: l.position, status: l.status, media: l.media, updated_at: l.updated_at });
+// School lessons and free classes are stored apart (body.track = 'school' | 'free'), same as the tutor function.
+const subjectOf = (b: any) => subjectKey(b.subject, b.track);
+const publicLesson = (l: any) => ({ id: l.id, subject: splitSubject(l.subject).name, track: splitSubject(l.subject).track, title: l.title, sections: l.sections, position: l.position, status: l.status, media: l.media, updated_at: l.updated_at });
 
 async function create(db: any, kid: any, body: any, day: string, hosts: string) {
   const subject = subjectOf(body);

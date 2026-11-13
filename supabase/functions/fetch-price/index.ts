@@ -1,5 +1,5 @@
 import { admin, cors, json } from '../_shared/common.ts';
-import { callAI } from '../_shared/ai.ts';
+import { AiBusyError, callAI } from '../_shared/ai.ts';
 import { extractMeta, isHttpUrl, parseJsonLoose, parsePrice } from '../_shared/logic.ts';
 
 // deno-lint-ignore-file no-explicit-any
@@ -42,6 +42,7 @@ Deno.serve(async (req) => {
       source_url: source ?? (isHttpUrl(j.source_url) ? j.source_url : null),
     });
   } catch (e) {
+    if (e instanceof AiBusyError) return json({ error: 'ai_busy' }, 503);
     console.error(e);
     return json({ error: 'lookup_failed', detail: String((e as Error).message).slice(0, 200) }, 502);
   }

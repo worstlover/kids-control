@@ -1,5 +1,10 @@
 import { isSafePublicUrl } from './logic.ts';
 
+/** The site refused our server (Iranian education sites usually block non-Iranian IPs). The phone must fetch it instead. */
+export class SiteBlockedError extends Error {
+  constructor(public status: number) { super('site_blocked_' + status); }
+}
+
 /**
  * Fetch a public page or media file for the tutor. Every hop (redirects included) must pass isSafePublicUrl,
  * the body is capped, and the call times out. This blocks the obvious ways of reaching internal services.
@@ -20,6 +25,7 @@ export async function safeFetch(url: string, opts: { maxBytes: number; timeoutMs
       await res.body?.cancel();
       continue;
     }
+    if (res.status === 403 || res.status === 451 || res.status === 401) throw new SiteBlockedError(res.status);
     if (!res.ok) throw new Error('http_' + res.status);
     const len = Number(res.headers.get('content-length') ?? 0);
     if (len > opts.maxBytes) throw new Error('too_large');

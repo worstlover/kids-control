@@ -1,6 +1,6 @@
 import { admin, authDevice, cors, json } from '../_shared/common.ts';
-import { callAI } from '../_shared/ai.ts';
-import { safeFetch } from '../_shared/net.ts';
+import { AiBusyError, callAI, SearchQuotaError } from '../_shared/ai.ts';
+import { safeFetch, SiteBlockedError } from '../_shared/net.ts';
 import { extractMeta, hostAllowed, isHttpUrl, isSafePublicUrl, parseJsonLoose, parsePrice } from '../_shared/logic.ts';
 
 // deno-lint-ignore-file no-explicit-any
@@ -30,6 +30,9 @@ Deno.serve(async (req) => {
     }
   } catch (e) {
     console.error(e);
+    if (e instanceof AiBusyError) return json({ error: 'ai_busy' }, 503);
+    if (e instanceof SiteBlockedError) return json({ error: 'site_blocked' }, 422);
+    if (e instanceof SearchQuotaError) return json({ error: 'search_quota' }, 503);
     return json({ error: 'lookup_failed' }, 502);
   }
 });

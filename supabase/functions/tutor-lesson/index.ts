@@ -1,6 +1,6 @@
 import { admin, authDevice, cors, json } from '../_shared/common.ts';
-import { callAI, extractLesson, extractPage, transcribeLessonAudio } from '../_shared/ai.ts';
-import { safeFetch, toBase64 } from '../_shared/net.ts';
+import { AiBusyError, callAI, extractLesson, extractPage, transcribeLessonAudio } from '../_shared/ai.ts';
+import { safeFetch, SiteBlockedError, toBase64 } from '../_shared/net.ts';
 import { extractMedia, hostAllowed, isSafePublicUrl, isValidDay, nextSection, normalizePhrases, normalizeSections, parseJsonLoose, pickCached, splitSubject, subjectKey } from '../_shared/logic.ts';
 
 // deno-lint-ignore-file no-explicit-any
@@ -10,6 +10,21 @@ const MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const AUDIO_TYPES: Record<string, string> = { 'audio/mpeg': 'audio/mp3', 'audio/mp3': 'audio/mp3', 'audio/mp4': 'audio/aac', 'audio/x-m4a': 'audio/aac', 'audio/aac': 'audio/aac', 'audio/wav': 'audio/wav', 'audio/x-wav': 'audio/wav', 'audio/ogg': 'audio/ogg' };
 const MAX_LESSONS_PER_DAY = 8;
 const MAX_AUDIO_BYTES = 12_000_000;
+
+/**
+ * The QR page. The phone (inside Iran) fetches it first and sends it as qr_page, because many Iranian
+ * education sites block our foreign server. If the phone could not, the server tries itself.
+ */
+async function loadQrPage(body: any, qr: string, hosts: string): Promise<{ finalUrl: string; contentType: string; html: string }> {
+  const p = body.qr_page;
+  if (p && typeof p.final_url === 'string' && isSafePublicUrl(p.final_url) && hostAllowed(p.final_url, hosts)) {
+    const ct = String(p.content_type ?? '').split(';')[0].trim().toLowerCase();
+    return { finalUrl: p.final_url, contentType: ct, html: typeof p.html === 'string' ? p.html.slice(0, 1_500_000) : '' };
+  }
+  const page = await safeFetch(qr, { maxBytes: 1_500_000, accept: 'text/html,*/*' });
+  const isText = !page.contentType.startsWith('video/') && !page.contentType.startsWith('audio/');
+  return { finalUrl: page.finalUrl, contentType: page.contentType, html: isText ? new TextDecoder().decode(page.bytes) : '' };
+}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
@@ -39,6 +54,8 @@ Deno.serve(async (req) => {
     }
   } catch (e) {
     console.error(e);
+    if (e instanceof AiBusyError) return json({ error: 'ai_busy' }, 503);
+    if (e instanceof SiteBlockedError) return json({ error: 'site_blocked', status: e.status }, 422);
     return json({ error: 'lesson_unavailable', detail: String((e as Error).message).slice(0, 120) }, 502);
   }
 });
@@ -66,12 +83,12 @@ async function create(db: any, kid: any, body: any, day: string, hosts: string) 
   if (qr) {
     if (!isSafePublicUrl(qr)) return json({ error: 'bad_qr' }, 400);
     if (!hostAllowed(qr, hosts)) return json({ error: 'host_not_allowed', host: new URL(qr).hostname }, 403);
-    const page = await safeFetch(qr, { maxBytes: 1_500_000, accept: 'text/html,*/*' });
+    const page = await loadQrPage(body, qr, hosts);
     if (!hostAllowed(page.finalUrl, hosts)) return json({ error: 'host_not_allowed', host: new URL(page.finalUrl).hostname }, 403);
     if (page.contentType.startsWith('video/')) media = [{ type: 'video', url: page.finalUrl }];
     else if (page.contentType.startsWith('audio/')) media = [{ type: 'audio', url: page.finalUrl }];
     else {
-      const html = new TextDecoder().decode(page.bytes);
+      const html = page.html;
       pageText = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 6000);
       media = extractMedia(html, page.finalUrl).filter(m => m.type === 'page' || hostAllowed(m.url, hosts));
     }
@@ -128,10 +145,18 @@ async function audioDictation(db: any, kid: any, body: any, day: string, hosts: 
   const { count } = await db.from('dictations').select('id', { count: 'exact', head: true }).eq('kid_id', kid.id).eq('created_by', 'kid').eq('created_day', day);
   if ((count ?? 0) >= 5) return json({ error: 'daily_create_limit' }, 429);
 
-  const f = await safeFetch(a.url, { maxBytes: MAX_AUDIO_BYTES, timeoutMs: 30_000, accept: 'audio/*' });
-  const mime = AUDIO_TYPES[f.contentType];
+  // The phone downloads the audio (the site usually blocks our server) and sends it; otherwise the server tries.
+  let b64: string, ctype: string;
+  if (typeof body.audio_b64 === 'string' && body.audio_b64.length > 1000) {
+    if (body.audio_b64.length > Math.ceil(MAX_AUDIO_BYTES * 4 / 3) + 16) return json({ error: 'too_large' }, 413);
+    b64 = body.audio_b64; ctype = String(body.audio_type ?? '').split(';')[0].trim().toLowerCase();
+  } else {
+    const f = await safeFetch(a.url, { maxBytes: MAX_AUDIO_BYTES, timeoutMs: 30_000, accept: 'audio/*' });
+    b64 = toBase64(f.bytes); ctype = f.contentType;
+  }
+  const mime = AUDIO_TYPES[ctype] ?? (/\.mp3(\?|$)/i.test(a.url) ? 'audio/mp3' : undefined);
   if (!mime) return json({ error: 'bad_audio_type' }, 415);
-  const segs = await transcribeLessonAudio({ b64: toBase64(f.bytes), mime });
+  const segs = await transcribeLessonAudio({ b64, mime });
   if (segs.length < 2) return json({ status: 'retake', feedback: 'صوت درس خوانده نشد.' });
 
   const status = st?.dictation_requires_review === false ? 'ready' : 'review';
@@ -150,12 +175,12 @@ async function attachQr(db: any, kid: any, body: any, hosts: string) {
   const qr = typeof body.qr_url === 'string' ? body.qr_url.trim() : '';
   if (!isSafePublicUrl(qr)) return json({ error: 'bad_qr' }, 400);
   if (!hostAllowed(qr, hosts)) return json({ error: 'host_not_allowed', host: new URL(qr).hostname }, 403);
-  const page = await safeFetch(qr, { maxBytes: 1_500_000, accept: 'text/html,*/*' });
+  const page = await loadQrPage(body, qr, hosts);
   if (!hostAllowed(page.finalUrl, hosts)) return json({ error: 'host_not_allowed', host: new URL(page.finalUrl).hostname }, 403);
   let found: any[];
   if (page.contentType.startsWith('video/')) found = [{ type: 'video', url: page.finalUrl }];
   else if (page.contentType.startsWith('audio/')) found = [{ type: 'audio', url: page.finalUrl }];
-  else found = extractMedia(new TextDecoder().decode(page.bytes), page.finalUrl).filter(m => m.type === 'page' || hostAllowed(m.url, hosts));
+  else found = extractMedia(page.html, page.finalUrl).filter(m => m.type === 'page' || hostAllowed(m.url, hosts));
   const have = new Set((lesson.media ?? []).map((m: any) => m.url));
   const media = [...(lesson.media ?? []), ...found.filter(m => !have.has(m.url))].slice(0, 8);
   const { data: upd } = await db.from('tutor_lessons').update({ media, qr_url: qr, updated_at: new Date().toISOString() }).eq('id', lesson.id).select('*').single();

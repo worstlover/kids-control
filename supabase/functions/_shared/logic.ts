@@ -457,3 +457,53 @@ export function topicKey(text: string): string {
 export function reminderText(name: string): string {
   return `${String(name ?? '').trim().slice(0, 30)} جان، کارهات منتظرتن. نمیای؟`;
 }
+
+// ---------- Gemini model choice (like the clinic app: try, measure, remember the best) ----------
+
+export type ModelStat = { model: string; ok: number; fail: number; avg_ms: number | null; last_fail: string | null; last_quota: string | null };
+
+const FAMILY_RANK: Record<string, number> = { flash: 0, 'flash-lite': 1, pro: 2 };
+
+/** Parse one model id like "gemini-3.5-flash" / "gemini-3.8-flash-lite-002". null for TTS, image, embedding, preview… */
+export function parseModelId(id: string): { version: number; family: string } | null {
+  const m = /^gemini-(\d+(?:\.\d+)?)-(flash-lite|flash|pro)(?:-(?:\d{3}|latest))?$/.exec(id);
+  return m ? { version: Number(m[1]), family: m[2] } : null;
+}
+
+/** From Gemini's ListModels reply: chat models that can generateContent, version >= minVersion, in default order (flash first, oldest version first). */
+// deno-lint-ignore no-explicit-any
+export function pickModels(list: any, minVersion: number): string[] {
+  const out: { id: string; v: number; f: number }[] = [];
+  for (const m of list?.models ?? []) {
+    const id = String(m?.name ?? '').replace(/^models\//, '');
+    if (!(m?.supportedGenerationMethods ?? []).includes('generateContent')) continue;
+    const p = parseModelId(id);
+    if (!p || p.version < minVersion - 1e-9) continue;
+    out.push({ id, v: p.version, f: FAMILY_RANK[p.family] ?? 9 });
+  }
+  out.sort((a, b) => a.f - b.f || a.v - b.v || a.id.length - b.id.length);
+  return [...new Set(out.map(o => o.id))];
+}
+
+/**
+ * How well a model has been answering, 0..1-ish. Untried = 0.5. Recent failures and used-up quota push it down
+ * for a while; slow answers lose a little.
+ */
+export function modelScore(st: ModelStat | undefined, now = Date.now()): number {
+  if (!st) return 0.5;
+  let s = (st.ok + 1) / (st.ok + st.fail + 2);
+  if (st.avg_ms) s -= Math.min(0.15, st.avg_ms / 400_000);
+  const ago = (t: string | null) => t ? (now - Date.parse(t)) / 60_000 : Infinity;
+  const f = ago(st.last_fail), q = ago(st.last_quota);
+  if (f < 10) s -= 0.6; else if (f < 60) s -= 0.2;
+  if (q < 60) s -= 1; else if (q < 360) s -= 0.4;
+  return s;
+}
+
+/** Order to try: best score first; ties keep the default order. A pinned model (GEMINI_MODEL) always goes first. */
+export function orderModels(candidates: string[], stats: ModelStat[], pinned = '', now = Date.now()): string[] {
+  const by = new Map(stats.map(s => [s.model, s]));
+  const ranked = candidates.map((m, i) => ({ m, i, s: modelScore(by.get(m), now) }))
+    .sort((a, b) => b.s - a.s || a.i - b.i).map(x => x.m);
+  return pinned ? [pinned, ...ranked.filter(m => m !== pinned)] : ranked;
+}

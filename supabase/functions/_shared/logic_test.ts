@@ -235,3 +235,31 @@ Deno.test('tutor: answer matching and cache pick', () => {
   assertEquals(L.pickCached([]), null);
   assertEquals(L.topicKey('  کسر چیست؟ '), 'topic:کسر چیست');
 });
+
+Deno.test('model list: only chat models from 3.5 up, flash first', () => {
+  const list = { models: [
+    { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.8-flash', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.5-flash', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.5-pro', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.5-flash-lite', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.8-flash-tts', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3.5-flash-preview-05', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/text-embedding-004', supportedGenerationMethods: ['embedContent'] },
+  ] };
+  assertEquals(L.pickModels(list, 3.5), ['gemini-3.5-flash', 'gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.5-pro']);
+});
+
+Deno.test('model order: the one that answers well wins; a busy one waits', () => {
+  const now = Date.parse('2026-11-13T12:00:00Z');
+  const c = ['gemini-3.5-flash', 'gemini-3.8-flash'];
+  assertEquals(L.orderModels(c, [], '', now), c);                                   // nothing known: default order
+  const stats = [
+    { model: 'gemini-3.5-flash', ok: 2, fail: 6, avg_ms: 9000, last_fail: '2026-11-13T11:58:00Z', last_quota: null },
+    { model: 'gemini-3.8-flash', ok: 20, fail: 1, avg_ms: 4000, last_fail: '2026-11-12T08:00:00Z', last_quota: null },
+  ];
+  assertEquals(L.orderModels(c, stats, '', now), ['gemini-3.8-flash', 'gemini-3.5-flash']);
+  const quota = [{ model: 'gemini-3.8-flash', ok: 50, fail: 0, avg_ms: 3000, last_fail: null, last_quota: '2026-11-13T11:30:00Z' }];
+  assertEquals(L.orderModels(c, quota, '', now)[0], 'gemini-3.5-flash');           // quota used up -> try the other
+  assertEquals(L.orderModels(c, stats, 'gemini-3.5-flash', now)[0], 'gemini-3.5-flash'); // pinned stays first
+});

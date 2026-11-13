@@ -536,6 +536,12 @@ class MainActivity : Activity() {
             val attach = TutorState.lessonId.isNotEmpty()
             runOnUiThread { sd.setStep(0, StatusDialog.DONE); sd.waitingForAi(2) }
             val body = JSONObject().put("kid_id", TutorState.kidId).put("subject", TutorState.subject).put("track", TutorState.track).put("day", Sync.today()).put("qr_url", url)
+            // The phone opens the QR page itself: many school sites block the (foreign) server.
+            Sync.fetchPublic(url, 1_500_000)?.let { f ->
+                val page = JSONObject().put("final_url", f.finalUrl).put("content_type", f.contentType)
+                if (!f.contentType.startsWith("video/") && !f.contentType.startsWith("audio/")) page.put("html", String(f.bytes, Charsets.UTF_8))
+                body.put("qr_page", page)
+            }
             if (attach) body.put("action", "attach_qr").put("lesson_id", TutorState.lessonId) else body.put("action", "create")
             val (code, r) = Sync.tutorLesson(prefs, body)
             runOnUiThread { tutorGotLesson(sd, code, r, attach); refresh() }

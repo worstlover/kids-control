@@ -328,6 +328,46 @@ create unique index if not exists one_bonus_per_day on points_ledger (kid_id, no
 alter view wishlist_progress set (security_invoker = true);
 alter view kid_balance set (security_invoker = true);
 
+-- Which Gemini model answers best (the server tries, measures and remembers; see _shared/ai.ts)
+create table if not exists ai_models (
+  model text primary key,
+  ok int not null default 0,
+  fail int not null default 0,
+  avg_ms int,
+  last_ok timestamptz,
+  last_fail timestamptz,
+  last_quota timestamptz,
+  last_error text,
+  updated_at timestamptz not null default now()
+);
+create table if not exists ai_state (
+  id int primary key default 1 check (id = 1),
+  models jsonb not null default '[]',
+  models_at timestamptz,
+  preferred text
+);
+insert into ai_state (id) values (1) on conflict do nothing;
+
+create or replace function ai_model_record(p_model text, p_ok boolean, p_ms int, p_quota boolean, p_error text)
+returns void language sql as $$
+  insert into ai_models as m (model, ok, fail, avg_ms, last_ok, last_fail, last_quota, last_error, updated_at)
+  values (p_model, case when p_ok then 1 else 0 end, case when p_ok then 0 else 1 end,
+          case when p_ok then p_ms end, case when p_ok then now() end, case when p_ok then null else now() end,
+          case when p_quota then now() end, case when p_ok then null else left(p_error, 200) end, now())
+  on conflict (model) do update set
+    -- halve old history now and then, so a model that got better (or worse) is noticed
+    ok = (case when m.ok + m.fail >= 40 then m.ok / 2 else m.ok end) + case when p_ok then 1 else 0 end,
+    fail = (case when m.ok + m.fail >= 40 then m.fail / 2 else m.fail end) + case when p_ok then 0 else 1 end,
+    avg_ms = case when p_ok then coalesce(round(m.avg_ms * 0.8 + p_ms * 0.2), p_ms) else m.avg_ms end,
+    last_ok = case when p_ok then now() else m.last_ok end,
+    last_fail = case when p_ok then m.last_fail else now() end,
+    last_quota = case when p_quota then now() else m.last_quota end,
+    last_error = case when p_ok then m.last_error else left(p_error, 200) end,
+    updated_at = now();
+  update ai_state set preferred = p_model where id = 1 and p_ok;
+$$;
+revoke all on function ai_model_record(text, boolean, int, boolean, text) from public, anon, authenticated;
+
 -- Row Level Security: only the logged-in parent has direct access.
 -- The kid phone has NO direct table access; it uses Edge Functions
 -- (device-sync, device-submit) with a device token, running as service role.
@@ -335,7 +375,7 @@ do $$
 declare t text;
 begin
   foreach t in array array['settings','kids','tasks','task_logs','app_rules','usage_logs',
-    'points_ledger','wishlist','month_closings','devices','device_commands','device_apps','dictations','tutor_profiles','tutor_plans','tutor_exercises','penalty_rules','penalty_logs','tutor_lessons','tutor_concepts','wish_lookups','tutor_cache']
+    'points_ledger','wishlist','month_closings','devices','device_commands','device_apps','dictations','tutor_profiles','tutor_plans','tutor_exercises','penalty_rules','penalty_logs','tutor_lessons','tutor_concepts','wish_lookups','tutor_cache','ai_models','ai_state']
   loop
     execute format('alter table %I enable row level security', t);
     execute format('drop policy if exists parent_all on %I', t);

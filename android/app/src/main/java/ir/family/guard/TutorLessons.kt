@@ -18,10 +18,11 @@ import org.json.JSONObject
 import kotlin.concurrent.thread
 
 /** Same idea as tutorCall, but for the lessons endpoint (same school/free split, same "drop replies for an old screen"). */
-fun MainActivity.lessonCall(kid: Kid, subject: String, body: JSONObject, always: Boolean = false, then: (Int, JSONObject?) -> Unit) {
+fun MainActivity.lessonCall(kid: Kid, subject: String, body: JSONObject, always: Boolean = false, prepare: ((JSONObject) -> Unit)? = null, then: (Int, JSONObject?) -> Unit) {
     body.put("kid_id", kid.id).put("day", Sync.today()).put("subject", subject).put("track", TutorState.track)
     val gen = TutorState.gen
     thread {
+        try { prepare?.invoke(body) } catch (e: Exception) {}
         val (code, r) = try { Sync.tutorLesson(prefs, body) } catch (e: Exception) { Pair(-1, null) }
         runOnUiThread { deliver(gen, always) { then(code, r) } }
     }
@@ -134,6 +135,7 @@ private fun MainActivity.tutorLessonHubUnsafe(kid: Kid, subject: String, lesson:
 
     val media = lesson.optJSONArray("media")
     var hasAudio = false
+    var firstAudio: String? = null
     if (media != null && media.length() > 0) {
         add(ui.title("فیلم و صوت درس"))
         for (i in 0 until media.length()) {
@@ -142,12 +144,19 @@ private fun MainActivity.tutorLessonHubUnsafe(kid: Kid, subject: String, lesson:
             when (m.getString("type")) {
                 "video" -> add(ui.pill("▶ فیلم درس", Pal.PURPLE) { playVideo(url) })
                 "page" -> add(ui.pill("▶ فیلم درس (صفحه‌ی وب)", Pal.PURPLE) { playWeb(url) })
-                "audio" -> { hasAudio = true; add(ui.pill("🎧 صوت درس", Pal.BLUE) { toggleAudio(url) }) }
+                "audio" -> { hasAudio = true; if (firstAudio == null) firstAudio = url; add(ui.pill("🎧 صوت درس", Pal.BLUE) { toggleAudio(url) }) }
             }
         }
     }
     if (hasAudio) add(ui.pill("✏️ دیکته از روی صوت درس", Pal.ORANGE) {
-        lessonCall(kid, subject, JSONObject().put("action", "audio_dictation").put("lesson_id", lid), always = true) { code, r ->
+        toast("دارم صوت درس را می‌گیرم… کمی صبر کن")
+        val audioUrl = firstAudio
+        lessonCall(kid, subject, JSONObject().put("action", "audio_dictation").put("lesson_id", lid), always = true, prepare = { b ->
+            // download on the phone (the school site usually blocks the server); the server falls back to trying itself
+            if (audioUrl != null) Sync.fetchPublic(audioUrl, 12_000_000, "audio/*", 40_000)?.let { f ->
+                b.put("audio_b64", android.util.Base64.encodeToString(f.bytes, android.util.Base64.NO_WRAP)).put("audio_type", f.contentType)
+            }
+        }) { code, r ->
             val msg = when {
                 code == 200 && r?.optString("status") == "review" -> "دیکته ساخته شد (${fa(r.optInt("phrase_count"))} جمله).\nبعد از تایید پدر و مادر شروع می‌شود."
                 code == 200 && r?.optString("status") == "ready" -> "دیکته آماده است! از صفحه‌ی اصلی، بخش دیکته، شروعش کن."
@@ -155,6 +164,8 @@ private fun MainActivity.tutorLessonHubUnsafe(kid: Kid, subject: String, lesson:
                 code == 429 -> "امروز به اندازه‌ی کافی دیکته‌ی جدید گرفتی؛ فردا دوباره."
                 code == 403 -> "این فایل صوتی مجاز نیست؛ از پدر و مادر بخواه اجازه بدهند."
                 code == 415 || code == 404 -> "این فایل برای دیکته مناسب نیست."
+                code == 422 -> "سایت کتاب صوت را نداد. اینترنت گوشی را چک کن و دوباره امتحان کن."
+                code == 503 -> "هوش مصنوعی الان خیلی شلوغ است؛ یکی دو دقیقه بعد دوباره امتحان کن."
                 else -> "الان نشد؛ کمی بعد دوباره امتحان کن."
             }
             AlertDialog.Builder(this).setMessage(msg).setPositiveButton("باشه", null).show()
@@ -183,6 +194,8 @@ private fun MainActivity.tutorGotLessonUnsafe(sd: StatusDialog, code: Int, r: JS
         code == 200 && r?.optString("status") == "retake" -> sd.result("📷", "صفحه واضح نبود", r.optString("feedback"), null, null, "دوباره می‌گیرم")
         code == 403 -> sd.result("🚫", "این لینک مجاز نیست", "آدرس «${r?.optString("host") ?: ""}» را پدر و مادر باید اجازه بدهند.", null, null)
         code == 400 -> sd.result("🤔", if (page) "عکس خوانده نشد" else "این QR درست نیست", if (page) "دوباره واضح‌تر عکس بگیر." else "QR کتاب درسی را بگیر.", null, null)
+        code == 422 -> sd.result("🌐", "سایت کتاب باز نشد", "گوشی نتوانست صفحه‌ی QR را باز کند. اینترنت را چک کن (بعضی سایت‌های کتاب درسی با فیلترشکن باز نمی‌شوند) و دوباره امتحان کن.", null, null)
+        code == 503 -> sd.result("⏳", "هوش مصنوعی شلوغ است", "الان سرش خیلی شلوغ است؛ یکی دو دقیقه بعد دوباره امتحان کن. درس‌های قبلی سر جایشان هستند.", null, null)
         code == 429 -> sd.result("🌙", "امروز دیگه بسه", if (page) "این درس به سقف ۱۲ صفحه رسیده." else "به سقف درس‌های جدید امروز رسیدی؛ فردا دوباره.", null, null)
         else -> sd.result("📶", "نشد", "اینترنت را چک کن و دوباره امتحان کن. درس‌هایی که قبلاً ساخته‌ای سر جایشان هستند.", null, null)
     }

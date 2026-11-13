@@ -16,6 +16,8 @@ const opt = n => { const i = args.indexOf('--' + n); return i >= 0 ? args[i + 1]
 const token = process.env.SUPABASE_ACCESS_TOKEN || opt('token');
 const ref = process.env.SUPABASE_PROJECT_REF || opt('ref');
 const gemini = process.env.GEMINI_API_KEY || opt('gemini-key');
+const model = opt('model');                    // optional: GEMINI_MODEL (e.g. the model another app of yours uses)
+const fallbackModel = opt('fallback-model');   // optional: GEMINI_FALLBACK_MODEL, tried when the main one is busy
 
 if (!token || !ref || !gemini) {
   console.error(`مقدار لازم کم است.
@@ -24,7 +26,7 @@ if (!token || !ref || !gemini) {
 
   token: Supabase ← Account ← Access Tokens ← Generate new token  (با sbp_ شروع می‌شود)
   ref:   Project Settings ← General ← Reference ID
-  --schema: schema.sql را هم اجرا می‌کند (فقط بار اول؛ بار دوم چون جدول‌ها هستند خطا می‌دهد)`);
+  --schema: schema.sql را هم اجرا می‌کند (تکرارش بی‌خطر است؛ داده‌ی قبلی دست نمی‌خورد)`);
   process.exit(1);
 }
 
@@ -50,7 +52,10 @@ try {
   }
 
   console.log('• ثبت کلید Gemini …');
-  await call('POST', `/v1/projects/${ref}/secrets`, [{ name: 'GEMINI_API_KEY', value: gemini }]);
+  const secrets = [{ name: 'GEMINI_API_KEY', value: gemini }];
+  if (model) secrets.push({ name: 'GEMINI_MODEL', value: model });
+  if (fallbackModel) secrets.push({ name: 'GEMINI_FALLBACK_MODEL', value: fallbackModel });
+  await call('POST', `/v1/projects/${ref}/secrets`, secrets);
   console.log('  ✓');
 
   for (const [slug, verifyJwt] of Object.entries(FUNCTIONS)) {

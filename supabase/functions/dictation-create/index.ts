@@ -1,5 +1,5 @@
 import { admin, authDevice, cors, json } from '../_shared/common.ts';
-import { extractDictation } from '../_shared/ai.ts';
+import { AiBusyError, extractDictation } from '../_shared/ai.ts';
 import { isValidDay } from '../_shared/logic.ts';
 
 // deno-lint-ignore-file no-explicit-any
@@ -27,7 +27,7 @@ Deno.serve(async (req) => {
   if ((count ?? 0) >= MAX_PER_DAY) return json({ error: 'daily_create_limit' }, 429);
 
   let d;
-  try { d = await extractDictation({ b64, mediaType }); } catch (e) { console.error(e); return json({ error: 'ai_unavailable' }, 502); }
+  try { d = await extractDictation({ b64, mediaType }); } catch (e) { console.error(e); return json({ error: e instanceof AiBusyError ? 'ai_busy' : 'ai_unavailable' }, e instanceof AiBusyError ? 503 : 502); }
   if (!d.readable) return json({ status: 'retake', feedback: d.feedback || 'صفحه واضح نبود؛ دوباره عکس بگیر.' });
 
   const { data: st } = await db.from('settings').select('dictation_requires_review,dictation_points').single();

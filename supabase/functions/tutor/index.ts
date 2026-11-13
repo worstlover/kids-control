@@ -1,5 +1,5 @@
 import { admin, authDevice, cors, json } from '../_shared/common.ts';
-import { callAI } from '../_shared/ai.ts';
+import { AiBusyError, callAI } from '../_shared/ai.ts';
 import { answerPoints, applyConceptResult, applyPractice, cleanSvg, conceptKey, isDue, isValidDay, nextLevel, nextSection, parseJsonLoose, pickCached, sameAnswer, splitSubject, subjectKey, tehranToday, topicKey, trackHint } from '../_shared/logic.ts';
 
 // deno-lint-ignore-file no-explicit-any
@@ -88,6 +88,7 @@ Deno.serve(async (req) => {
     }
   } catch (e) {
     console.error(e);
+    if (e instanceof AiBusyError) return json({ error: 'ai_busy' }, 503);
     return json({ error: 'tutor_unavailable', detail: String((e as Error).message).slice(0, 150) }, 502);
   }
 });

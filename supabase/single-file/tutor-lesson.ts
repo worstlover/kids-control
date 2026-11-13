@@ -463,6 +463,56 @@ function reminderText(name: string): string {
   return `${String(name ?? '').trim().slice(0, 30)} جان، کارهات منتظرتن. نمیای؟`;
 }
 
+// ---------- Gemini model choice (like the clinic app: try, measure, remember the best) ----------
+
+type ModelStat = { model: string; ok: number; fail: number; avg_ms: number | null; last_fail: string | null; last_quota: string | null };
+
+const FAMILY_RANK: Record<string, number> = { flash: 0, 'flash-lite': 1, pro: 2 };
+
+/** Parse one model id like "gemini-3.5-flash" / "gemini-3.8-flash-lite-002". null for TTS, image, embedding, preview… */
+function parseModelId(id: string): { version: number; family: string } | null {
+  const m = /^gemini-(\d+(?:\.\d+)?)-(flash-lite|flash|pro)(?:-(?:\d{3}|latest))?$/.exec(id);
+  return m ? { version: Number(m[1]), family: m[2] } : null;
+}
+
+/** From Gemini's ListModels reply: chat models that can generateContent, version >= minVersion, in default order (flash first, oldest version first). */
+// deno-lint-ignore no-explicit-any
+function pickModels(list: any, minVersion: number): string[] {
+  const out: { id: string; v: number; f: number }[] = [];
+  for (const m of list?.models ?? []) {
+    const id = String(m?.name ?? '').replace(/^models\//, '');
+    if (!(m?.supportedGenerationMethods ?? []).includes('generateContent')) continue;
+    const p = parseModelId(id);
+    if (!p || p.version < minVersion - 1e-9) continue;
+    out.push({ id, v: p.version, f: FAMILY_RANK[p.family] ?? 9 });
+  }
+  out.sort((a, b) => a.f - b.f || a.v - b.v || a.id.length - b.id.length);
+  return [...new Set(out.map(o => o.id))];
+}
+
+/**
+ * How well a model has been answering, 0..1-ish. Untried = 0.5. Recent failures and used-up quota push it down
+ * for a while; slow answers lose a little.
+ */
+function modelScore(st: ModelStat | undefined, now = Date.now()): number {
+  if (!st) return 0.5;
+  let s = (st.ok + 1) / (st.ok + st.fail + 2);
+  if (st.avg_ms) s -= Math.min(0.15, st.avg_ms / 400_000);
+  const ago = (t: string | null) => t ? (now - Date.parse(t)) / 60_000 : Infinity;
+  const f = ago(st.last_fail), q = ago(st.last_quota);
+  if (f < 10) s -= 0.6; else if (f < 60) s -= 0.2;
+  if (q < 60) s -= 1; else if (q < 360) s -= 0.4;
+  return s;
+}
+
+/** Order to try: best score first; ties keep the default order. A pinned model (GEMINI_MODEL) always goes first. */
+function orderModels(candidates: string[], stats: ModelStat[], pinned = '', now = Date.now()): string[] {
+  const by = new Map(stats.map(s => [s.model, s]));
+  const ranked = candidates.map((m, i) => ({ m, i, s: modelScore(by.get(m), now) }))
+    .sort((a, b) => b.s - a.s || a.i - b.i).map(x => x.m);
+  return pinned ? [pinned, ...ranked.filter(m => m !== pinned)] : ranked;
+}
+
 // ---- shared/common ----
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -491,6 +541,11 @@ async function authDevice(db: any, token: unknown) {
 }
 
 // ---- shared/net ----
+/** The site refused our server (Iranian education sites usually block non-Iranian IPs). The phone must fetch it instead. */
+class SiteBlockedError extends Error {
+  constructor(public status: number) { super('site_blocked_' + status); }
+}
+
 /**
  * Fetch a public page or media file for the tutor. Every hop (redirects included) must pass isSafePublicUrl,
  * the body is capped, and the call times out. This blocks the obvious ways of reaching internal services.
@@ -511,6 +566,7 @@ async function safeFetch(url: string, opts: { maxBytes: number; timeoutMs?: numb
       await res.body?.cancel();
       continue;
     }
+    if (res.status === 403 || res.status === 451 || res.status === 401) throw new SiteBlockedError(res.status);
     if (!res.ok) throw new Error('http_' + res.status);
     const len = Number(res.headers.get('content-length') ?? 0);
     if (len > opts.maxBytes) throw new Error('too_large');
@@ -540,12 +596,64 @@ function toBase64(bytes: Uint8Array): string {
 
 // ---- shared/ai ----
 // Google Gemini (REST). Set GEMINI_API_KEY as a Supabase secret; GEMINI_MODEL is optional.
-const MODEL = Deno.env.get('GEMINI_MODEL') ?? 'gemini-3.8-flash';
+// GEMINI_MODEL is optional: if set it is always tried first. Otherwise the server picks (see chooseModels).
+const PINNED = Deno.env.get('GEMINI_MODEL') ?? '';
+const MIN_VERSION = Number(Deno.env.get('GEMINI_MIN_VERSION') ?? '3.5');
+const DEFAULT_MODELS = ['gemini-3.5-flash', 'gemini-3.8-flash', 'gemini-3.5-flash-lite'];
 const BASE = Deno.env.get('GEMINI_BASE_URL') ?? 'https://generativelanguage.googleapis.com';
 
 type Part = { text: string } | { image: { mime: string; data: string } } | { audio: { mime: string; data: string } };
 
-async function callAI(parts: Part[], opts: { system?: string; search?: boolean; json?: boolean; maxTokens?: number } = {}): Promise<string> {
+/** Gemini answered "busy" (overload / rate limit) or timed out on every try. Handlers turn this into HTTP 503 ai_busy. */
+class AiBusyError extends Error {
+  constructor(public reason: string) { super('ai_busy: ' + reason); }
+}
+/** The Google-search tool's own quota is used up (free tier); retrying today will not help. */
+class SearchQuotaError extends Error {
+  constructor() { super('search_quota'); }
+}
+
+const FALLBACK = Deno.env.get('GEMINI_FALLBACK_MODEL') ?? '';
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+const LIST_TTL_MS = 24 * 3600_000;
+
+/**
+ * Which models to try, best first — like the clinic app: Gemini's own model list (refreshed daily, 3.5 and up),
+ * ordered by how each one has been answering lately (ai_models). Never throws: falls back to a fixed list.
+ */
+async function chooseModels(key: string): Promise<{ order: string[]; db: any }> {
+  let db: any = null, candidates: string[] = [], stats: ModelStat[] = [];
+  try {
+    db = admin();
+    const { data: st } = await db.from('ai_state').select('models,models_at').eq('id', 1).maybeSingle();
+    candidates = Array.isArray(st?.models) ? st.models : [];
+    if (!candidates.length || !st?.models_at || Date.now() - Date.parse(st.models_at) > LIST_TTL_MS) {
+      const r = await fetch(`${BASE}/v1beta/models?pageSize=1000`, { headers: { 'x-goog-api-key': key }, signal: AbortSignal.timeout(8_000) });
+      if (r.ok) {
+        const fresh = pickModels(await r.json(), MIN_VERSION);
+        if (fresh.length) { candidates = fresh; await db.from('ai_state').update({ models: fresh, models_at: new Date().toISOString() }).eq('id', 1); }
+      }
+    }
+    const { data } = await db.from('ai_models').select('model,ok,fail,avg_ms,last_fail,last_quota');
+    stats = data ?? [];
+  } catch (e) { console.warn('model choice: ' + (e as Error).message); }
+  if (!candidates.length) candidates = DEFAULT_MODELS;
+  if (FALLBACK && !candidates.includes(FALLBACK)) candidates = [...candidates, FALLBACK];
+  return { order: orderModels(candidates, stats, PINNED), db };
+}
+
+async function record(db: any, model: string, ok: boolean, ms: number, quota = false, error = '') {
+  if (!db) return;
+  try { await db.rpc('ai_model_record', { p_model: model, p_ok: ok, p_ms: Math.round(ms), p_quota: quota, p_error: error }); }
+  catch (e) { console.warn('ai_model_record: ' + (e as Error).message); }
+}
+
+/**
+ * One Gemini call. Tries up to 3 models (best-scoring first). Busy (503/500), rate/quota (429), timeouts and
+ * "model not available" (404/400 about the model) move on to the next model; every try is recorded, so the
+ * model that answers best becomes the first choice next time. All within a budget under the phone's timeout.
+ */
+async function callAI(parts: Part[], opts: { system?: string; search?: boolean; json?: boolean; maxTokens?: number; budgetMs?: number } = {}): Promise<string> {
   const key = Deno.env.get('GEMINI_API_KEY');
   if (!key) throw new Error('GEMINI_API_KEY is not set');
   const body: Record<string, unknown> = {
@@ -554,18 +662,55 @@ async function callAI(parts: Part[], opts: { system?: string; search?: boolean; 
   };
   if (opts.system) body.systemInstruction = { parts: [{ text: opts.system }] };
   if (opts.search) body.tools = [{ google_search: {} }];   // web search; cannot be combined with JSON mime type
-  const res = await fetch(`${BASE}/v1beta/models/${MODEL}:generateContent`, {
-    method: 'POST',
-    headers: { 'x-goog-api-key': key, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(60_000),
-  });
-  if (!res.ok) throw new Error(`Gemini API ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const data = await res.json();
-  // deno-lint-ignore no-explicit-any
-  const out = (data.candidates?.[0]?.content?.parts ?? []).filter((p: any) => p.text && !p.thought).map((p: any) => p.text).join('\n');
-  if (!out) throw new Error('empty AI reply: ' + JSON.stringify(data.promptFeedback ?? data.candidates?.[0]?.finishReason ?? ''));
-  return out;
+  const payload = JSON.stringify(body);
+  const deadline = Date.now() + (opts.budgetMs ?? 75_000);
+  const { order, db } = await chooseModels(key);
+  const tries = order.slice(0, 3);
+  while (tries.length < 3 && order.length) tries.push(order[tries.length % order.length]);   // few models: give the best one another go
+  let last = '', allQuota = true;
+  for (let i = 0; i < tries.length; i++) {
+    const model = tries[i];
+    const left = deadline - Date.now();
+    if (left < 8_000) break;
+    if (i > 0) await sleep(Math.min(800 * i, left - 7_000));
+    const t0 = Date.now();
+    let res: Response;
+    try {
+      res = await fetch(`${BASE}/v1beta/models/${model}:generateContent`, {
+        method: 'POST',
+        headers: { 'x-goog-api-key': key, 'content-type': 'application/json' },
+        body: payload,
+        signal: AbortSignal.timeout(Math.max(5_000, Math.min(i === 0 ? 45_000 : 35_000, deadline - Date.now()))),
+      });
+    } catch (e) {
+      last = (e as Error).name === 'TimeoutError' ? 'timeout' : 'network: ' + (e as Error).message;
+      allQuota = false;
+      console.warn(`Gemini ${model} try ${i + 1}: ${last}`);
+      await record(db, model, false, Date.now() - t0, false, last);
+      continue;
+    }
+    if (!res.ok) {
+      const t = (await res.text()).slice(0, 300);
+      const quota = res.status === 429 && /quota/i.test(t);
+      const modelProblem = res.status === 404 || (res.status === 400 && /model|not supported|not found/i.test(t));
+      if (res.status === 503 || res.status === 500 || res.status === 429 || modelProblem) {
+        last = `${res.status} ${model}`;
+        if (!quota) allQuota = false;
+        console.warn(`Gemini try ${i + 1}: ${last}: ${t.slice(0, 120)}`);
+        await record(db, model, false, Date.now() - t0, quota && !opts.search, `${res.status} ${t.slice(0, 150)}`);
+        continue;
+      }
+      throw new Error(`Gemini API ${res.status} (${model}): ${t}`);
+    }
+    const data = await res.json();
+    // deno-lint-ignore no-explicit-any
+    const out = (data.candidates?.[0]?.content?.parts ?? []).filter((p: any) => p.text && !p.thought).map((p: any) => p.text).join('\n');
+    if (!out) throw new Error('empty AI reply: ' + JSON.stringify(data.promptFeedback ?? data.candidates?.[0]?.finishReason ?? ''));
+    await record(db, model, true, Date.now() - t0);
+    return out;
+  }
+  if (opts.search && allQuota && last) throw new SearchQuotaError();
+  throw new AiBusyError(last || 'no time left');
 }
 
 const RUBRIC: Record<string, string> = {
@@ -702,6 +847,21 @@ const AUDIO_TYPES: Record<string, string> = { 'audio/mpeg': 'audio/mp3', 'audio/
 const MAX_LESSONS_PER_DAY = 8;
 const MAX_AUDIO_BYTES = 12_000_000;
 
+/**
+ * The QR page. The phone (inside Iran) fetches it first and sends it as qr_page, because many Iranian
+ * education sites block our foreign server. If the phone could not, the server tries itself.
+ */
+async function loadQrPage(body: any, qr: string, hosts: string): Promise<{ finalUrl: string; contentType: string; html: string }> {
+  const p = body.qr_page;
+  if (p && typeof p.final_url === 'string' && isSafePublicUrl(p.final_url) && hostAllowed(p.final_url, hosts)) {
+    const ct = String(p.content_type ?? '').split(';')[0].trim().toLowerCase();
+    return { finalUrl: p.final_url, contentType: ct, html: typeof p.html === 'string' ? p.html.slice(0, 1_500_000) : '' };
+  }
+  const page = await safeFetch(qr, { maxBytes: 1_500_000, accept: 'text/html,*/*' });
+  const isText = !page.contentType.startsWith('video/') && !page.contentType.startsWith('audio/');
+  return { finalUrl: page.finalUrl, contentType: page.contentType, html: isText ? new TextDecoder().decode(page.bytes) : '' };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
@@ -730,6 +890,8 @@ Deno.serve(async (req) => {
     }
   } catch (e) {
     console.error(e);
+    if (e instanceof AiBusyError) return json({ error: 'ai_busy' }, 503);
+    if (e instanceof SiteBlockedError) return json({ error: 'site_blocked', status: e.status }, 422);
     return json({ error: 'lesson_unavailable', detail: String((e as Error).message).slice(0, 120) }, 502);
   }
 });
@@ -757,12 +919,12 @@ async function create(db: any, kid: any, body: any, day: string, hosts: string) 
   if (qr) {
     if (!isSafePublicUrl(qr)) return json({ error: 'bad_qr' }, 400);
     if (!hostAllowed(qr, hosts)) return json({ error: 'host_not_allowed', host: new URL(qr).hostname }, 403);
-    const page = await safeFetch(qr, { maxBytes: 1_500_000, accept: 'text/html,*/*' });
+    const page = await loadQrPage(body, qr, hosts);
     if (!hostAllowed(page.finalUrl, hosts)) return json({ error: 'host_not_allowed', host: new URL(page.finalUrl).hostname }, 403);
     if (page.contentType.startsWith('video/')) media = [{ type: 'video', url: page.finalUrl }];
     else if (page.contentType.startsWith('audio/')) media = [{ type: 'audio', url: page.finalUrl }];
     else {
-      const html = new TextDecoder().decode(page.bytes);
+      const html = page.html;
       pageText = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 6000);
       media = extractMedia(html, page.finalUrl).filter(m => m.type === 'page' || hostAllowed(m.url, hosts));
     }
@@ -819,10 +981,18 @@ async function audioDictation(db: any, kid: any, body: any, day: string, hosts: 
   const { count } = await db.from('dictations').select('id', { count: 'exact', head: true }).eq('kid_id', kid.id).eq('created_by', 'kid').eq('created_day', day);
   if ((count ?? 0) >= 5) return json({ error: 'daily_create_limit' }, 429);
 
-  const f = await safeFetch(a.url, { maxBytes: MAX_AUDIO_BYTES, timeoutMs: 30_000, accept: 'audio/*' });
-  const mime = AUDIO_TYPES[f.contentType];
+  // The phone downloads the audio (the site usually blocks our server) and sends it; otherwise the server tries.
+  let b64: string, ctype: string;
+  if (typeof body.audio_b64 === 'string' && body.audio_b64.length > 1000) {
+    if (body.audio_b64.length > Math.ceil(MAX_AUDIO_BYTES * 4 / 3) + 16) return json({ error: 'too_large' }, 413);
+    b64 = body.audio_b64; ctype = String(body.audio_type ?? '').split(';')[0].trim().toLowerCase();
+  } else {
+    const f = await safeFetch(a.url, { maxBytes: MAX_AUDIO_BYTES, timeoutMs: 30_000, accept: 'audio/*' });
+    b64 = toBase64(f.bytes); ctype = f.contentType;
+  }
+  const mime = AUDIO_TYPES[ctype] ?? (/\.mp3(\?|$)/i.test(a.url) ? 'audio/mp3' : undefined);
   if (!mime) return json({ error: 'bad_audio_type' }, 415);
-  const segs = await transcribeLessonAudio({ b64: toBase64(f.bytes), mime });
+  const segs = await transcribeLessonAudio({ b64, mime });
   if (segs.length < 2) return json({ status: 'retake', feedback: 'صوت درس خوانده نشد.' });
 
   const status = st?.dictation_requires_review === false ? 'ready' : 'review';
@@ -841,12 +1011,12 @@ async function attachQr(db: any, kid: any, body: any, hosts: string) {
   const qr = typeof body.qr_url === 'string' ? body.qr_url.trim() : '';
   if (!isSafePublicUrl(qr)) return json({ error: 'bad_qr' }, 400);
   if (!hostAllowed(qr, hosts)) return json({ error: 'host_not_allowed', host: new URL(qr).hostname }, 403);
-  const page = await safeFetch(qr, { maxBytes: 1_500_000, accept: 'text/html,*/*' });
+  const page = await loadQrPage(body, qr, hosts);
   if (!hostAllowed(page.finalUrl, hosts)) return json({ error: 'host_not_allowed', host: new URL(page.finalUrl).hostname }, 403);
   let found: any[];
   if (page.contentType.startsWith('video/')) found = [{ type: 'video', url: page.finalUrl }];
   else if (page.contentType.startsWith('audio/')) found = [{ type: 'audio', url: page.finalUrl }];
-  else found = extractMedia(new TextDecoder().decode(page.bytes), page.finalUrl).filter(m => m.type === 'page' || hostAllowed(m.url, hosts));
+  else found = extractMedia(page.html, page.finalUrl).filter(m => m.type === 'page' || hostAllowed(m.url, hosts));
   const have = new Set((lesson.media ?? []).map((m: any) => m.url));
   const media = [...(lesson.media ?? []), ...found.filter(m => !have.has(m.url))].slice(0, 8);
   const { data: upd } = await db.from('tutor_lessons').update({ media, qr_url: qr, updated_at: new Date().toISOString() }).eq('id', lesson.id).select('*').single();

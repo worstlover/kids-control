@@ -18,6 +18,41 @@ object Sync {
 
     fun loadState(p: Prefs): State? = if (p.stateJson.isEmpty()) null else StateParser.parse(p.stateJson)
 
+    class Fetched(val finalUrl: String, val contentType: String, val bytes: ByteArray)
+
+    /**
+     * GET a public page or file from the phone itself. Iranian school sites (roshd.ir, sch.ir …) often block
+     * our foreign server, but the phone is in Iran, so it fetches and the server only reads what it is sent.
+     * Only http(s), at most 5 redirects, capped size; null on any failure (the server then tries itself).
+     */
+    fun fetchPublic(url: String, maxBytes: Int, accept: String = "text/html,*/*", timeoutMs: Int = 20_000): Fetched? = try {
+        var cur = url
+        var out: Fetched? = null
+        for (hop in 0 until 5) {
+            val u = URL(cur)
+            if (u.protocol != "https" && u.protocol != "http") break
+            val c = u.openConnection() as HttpURLConnection
+            c.instanceFollowRedirects = false; c.connectTimeout = timeoutMs; c.readTimeout = timeoutMs
+            c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
+            c.setRequestProperty("Accept", accept); c.setRequestProperty("Accept-Language", "fa,en")
+            val code = c.responseCode
+            if (code in 300..399) { val loc = c.getHeaderField("Location") ?: break; cur = URL(u, loc).toString(); c.disconnect(); continue }
+            if (code !in 200..299) { c.disconnect(); break }
+            if (c.contentLengthLong > maxBytes) { c.disconnect(); break }
+            val ctype = (c.contentType ?: "").substringBefore(';').trim().lowercase()
+            val buf = java.io.ByteArrayOutputStream()
+            var tooBig = false
+            c.inputStream.use { ins ->
+                val b = ByteArray(16_384)
+                while (true) { val n = ins.read(b); if (n < 0) break; buf.write(b, 0, n); if (buf.size() > maxBytes) { tooBig = true; break } }
+            }
+            c.disconnect()
+            if (!tooBig) out = Fetched(cur, ctype, buf.toByteArray())
+            break
+        }
+        out
+    } catch (e: Exception) { null }
+
     /** POST JSON to a Supabase Edge Function. Returns (httpCode, body). Code -1 = network error. */
     fun post(p: Prefs, fn: String, body: JSONObject, timeoutMs: Int = 30_000, onProgress: ((Int) -> Unit)? = null): Pair<Int, JSONObject?> = try {
         val c = URL("${p.sbUrl}/functions/v1/$fn").openConnection() as HttpURLConnection
@@ -108,7 +143,7 @@ object Sync {
     }
 
     /** Kid's wish list: lookup a price (by link or name), add a wish, or remove one. */
-    fun wish(p: Prefs, body: JSONObject): Pair<Int, JSONObject?> = post(p, "wish", body.put("token", p.token), 60_000)
+    fun wish(p: Prefs, body: JSONObject): Pair<Int, JSONObject?> = post(p, "wish", body.put("token", p.token), 90_000)
 
     /** Kid's wallet: summary (where points came from / went) and spend (snack, fun, invest). */
     fun wallet(p: Prefs, body: JSONObject): Pair<Int, JSONObject?> = post(p, "wallet", body.put("token", p.token), 30_000)

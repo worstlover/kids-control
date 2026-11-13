@@ -100,10 +100,11 @@ internal inline fun MainActivity.safely(what: String, block: () -> Unit) {
 fun MainActivity.tutorCall(kid: Kid, body: JSONObject, always: Boolean = false, then: (Int, JSONObject?) -> Unit) {
     body.put("kid_id", kid.id).put("day", Sync.today()).put("track", TutorState.track)
     val gen = TutorState.gen
+    Waiting.begin(this)
     thread {
         // Never let a bad/partial reply from the server crash the app.
-        val (code, r) = try { Sync.tutor(prefs, body) } catch (e: Exception) { Pair(-1, null) }
-        runOnUiThread { deliver(gen, always) { then(code, r) } }
+        val (code, r) = try { Sync.tutor(prefs, body) { p -> if (p >= 100) Waiting.uploaded() } } catch (e: Exception) { Pair(-1, null) }
+        runOnUiThread { Waiting.end(); deliver(gen, always) { then(code, r) } }
     }
 }
 
@@ -292,7 +293,7 @@ fun MainActivity.tutorHub(kid: Kid, subject: String, r: JSONObject) {
                 addView(ui.pill("▶ ادامه‌ی «${ll.optString("title")}» (${fa(ll.optInt("done"))} از ${fa(ll.optInt("total"))} بخش)", Pal.PURPLE) { tutorOpenLesson(kid, subject, ll.optString("id")) })
             }
             addView(ui.pill("📷 عکس صفحه‌ی اول درس جدید", Pal.ORANGE) { TutorState.subject = subject; TutorState.kidId = kid.id; TutorState.lessonId = ""; takePhoto("lessonpage", "") })
-            addView(ui.pill("🔳 QR کتاب", Pal.BLUE) { TutorState.subject = subject; TutorState.kidId = kid.id; TutorState.lessonId = ""; takePhoto("qr", "") })
+            addView(ui.pill("🔳 QR کتاب", Pal.BLUE) { TutorState.subject = subject; TutorState.kidId = kid.id; TutorState.lessonId = ""; startQr() })
             if (hasLessons) addView(ui.pill("📖 همه‌ی درس‌هایم", Pal.MUTED) { tutorLessons(kid, subject) })
         })
         add(ui.text("بیشتر:", 14f, Pal.MUTED))

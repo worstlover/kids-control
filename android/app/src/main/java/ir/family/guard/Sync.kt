@@ -149,7 +149,7 @@ object Sync {
     fun wallet(p: Prefs, body: JSONObject): Pair<Int, JSONObject?> = post(p, "wallet", body.put("token", p.token), 30_000)
 
     /** Tutor: level test, plan, practice, check, explain. The server answers in a JSON object. */
-    fun tutor(p: Prefs, body: JSONObject): Pair<Int, JSONObject?> = post(p, "tutor", body.put("token", p.token), 90_000)
+    fun tutor(p: Prefs, body: JSONObject, onProgress: ((Int) -> Unit)? = null): Pair<Int, JSONObject?> = post(p, "tutor", body.put("token", p.token), 90_000, onProgress)
 
     /** Lessons from the textbook: create, list, get, progress, attach_qr, audio_dictation. */
     fun tutorLesson(p: Prefs, body: JSONObject, timeoutMs: Int = 90_000, onProgress: ((Int) -> Unit)? = null): Pair<Int, JSONObject?> = post(p, "tutor-lesson", body.put("token", p.token), timeoutMs, onProgress)

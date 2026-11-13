@@ -469,6 +469,11 @@ class MainActivity : Activity() {
         catch (e: Exception) { contentResolver.delete(uri, null, null); toast("برنامه‌ی دوربین پیدا نشد") }
     }
 
+    override fun onRequestPermissionsResult(req: Int, perms: Array<out String>, results: IntArray) {
+        super.onRequestPermissionsResult(req, perms, results)
+        if (req == QrScan.REQ_CAMERA) onCameraPermission(results.isNotEmpty() && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED)
+    }
+
     @Deprecated("simple camera flow")
     override fun onActivityResult(req: Int, res: Int, data: Intent?) {
         super.onActivityResult(req, res, data)
@@ -519,7 +524,7 @@ class MainActivity : Activity() {
     /** Reads the QR on the phone (no internet needed), then asks the server to build or extend the lesson from its link. */
     private fun handleQrPhoto(uri: Uri) {
         val sd = StatusDialog(this)
-        sd.steps("🔳", "دارم QR کتاب را می‌خوانم", listOf("خواندن QR", "فرستادن لینک", "گرفتن درس از سایت"))
+        sd.steps("🔳", "دارم QR را از عکس می‌خوانم", listOf("خواندن QR"))
         sd.show(); sd.setStep(0, StatusDialog.ACTIVE)
         thread {
             val url: String? = try {
@@ -532,19 +537,63 @@ class MainActivity : Activity() {
                 Qr.decode(px, bmp.width, bmp.height)
             } catch (e: Exception) { null }
             try { contentResolver.delete(uri, null, null) } catch (e: Exception) {}
-            if (url == null) { runOnUiThread { sd.result("🔳", "QR پیدا نشد", "نزدیک‌تر و واضح‌تر عکس بگیر؛ QR کامل و صاف توی عکس باشد.", null, null, "دوباره می‌گیرم") }; return@thread }
-            val attach = TutorState.lessonId.isNotEmpty()
-            runOnUiThread { sd.setStep(0, StatusDialog.DONE); sd.waitingForAi(2) }
-            val body = JSONObject().put("kid_id", TutorState.kidId).put("subject", TutorState.subject).put("track", TutorState.track).put("day", Sync.today()).put("qr_url", url)
-            // The phone opens the QR page itself: many school sites block the (foreign) server.
-            Sync.fetchPublic(url, 1_500_000)?.let { f ->
-                val page = JSONObject().put("final_url", f.finalUrl).put("content_type", f.contentType)
-                if (!f.contentType.startsWith("video/") && !f.contentType.startsWith("audio/")) page.put("html", String(f.bytes, Charsets.UTF_8))
-                body.put("qr_page", page)
+            runOnUiThread {
+                if (url == null) sd.result("🔳", "QR پیدا نشد", "نزدیک‌تر و واضح‌تر عکس بگیر؛ QR کامل و صاف توی عکس باشد.", null, null, "دوباره می‌گیرم")
+                else { sd.dismiss(); handleQrUrl(url) }
             }
+        }
+    }
+
+    /** Live scan first (like the phone's camera); the photo way stays as a fallback inside the scanner. */
+    internal fun startQr() = scanQr { url -> handleQrUrl(url) }
+
+    /**
+     * A QR was read. The phone opens the page itself (school sites often block our server), finds its video/audio,
+     * and asks the server to make the lesson. If the server or the AI cannot, the kid still gets the page's
+     * video/audio part by part, or the page itself.
+     */
+    internal fun handleQrUrl(raw: String) {
+        val url = raw.trim()
+        if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) {
+            AlertDialog.Builder(this).setMessage("این QR لینک درس نیست:\n$url").setPositiveButton("باشه", null).show(); return
+        }
+        val sd = StatusDialog(this)
+        sd.steps("🔳", "QR پیدا شد!", listOf("خواندن QR", "باز کردن صفحه‌ی کتاب", "خواندن درس با هوش مصنوعی"))
+        sd.show(); sd.setStep(0, StatusDialog.DONE); sd.setStep(1, StatusDialog.ACTIVE)
+        val attach = TutorState.lessonId.isNotEmpty()
+        thread {
+            val f = Sync.fetchPublic(url, 1_500_000)
+            var html = if (f != null && !f.contentType.startsWith("video/") && !f.contentType.startsWith("audio/")) String(f.bytes, Charsets.UTF_8) else ""
+            var local = f?.let { LessonMedia.fromResponse(it.finalUrl, it.contentType, html) }.orEmpty()
+            var pageUrl = f?.finalUrl ?: url
+            var rendered: PageReader.Result? = null
+            // Pages built by JavaScript (roshd.ir …) show no video or text in plain HTML: open them in an invisible browser.
+            val visible = html.replace(Regex("(?is)<script.*?</script>|<style.*?</style>"), " ").replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim().length
+            if (local.isEmpty() || visible < 400) {
+                runOnUiThread { sd.setStep(1, StatusDialog.ACTIVE, "صفحه را مثل مرورگر باز می‌کنم…") }
+                val latch = java.util.concurrent.CountDownLatch(1)
+                runOnUiThread { PageReader.read(this, f?.finalUrl ?: url) { r -> rendered = r; latch.countDown() } }
+                latch.await(30, java.util.concurrent.TimeUnit.SECONDS)
+                rendered?.let { r ->
+                    if (r.html.length > html.length) html = r.html
+                    local = (local + r.media + LessonMedia.extract(r.html, r.finalUrl)).distinctBy { it.url }.take(8)
+                    pageUrl = r.finalUrl
+                }
+            }
+            runOnUiThread {
+                sd.setStep(1, StatusDialog.DONE, if (f == null) "گوشی صفحه را باز نکرد" else if (local.isNotEmpty()) "${fa(local.size)} فیلم/صدا پیدا شد" else "")
+                sd.waitingForAi(2)
+            }
+            val body = JSONObject().put("kid_id", TutorState.kidId).put("subject", TutorState.subject).put("track", TutorState.track).put("day", Sync.today()).put("qr_url", url)
+            if (f != null || rendered != null) body.put("qr_page", JSONObject().put("final_url", pageUrl).put("content_type", if (rendered != null) "text/html" else f?.contentType ?: "")
+                .apply {
+                    if (html.isNotEmpty()) put("html", html)
+                    rendered?.let { r -> if (r.text.isNotBlank()) put("text", r.text); if (r.title.isNotBlank()) put("title", r.title) }
+                    if (local.isNotEmpty()) put("media", org.json.JSONArray().apply { local.forEach { m -> put(JSONObject().put("type", m.type).put("url", m.url).put("title", m.title)) } })
+                })
             if (attach) body.put("action", "attach_qr").put("lesson_id", TutorState.lessonId) else body.put("action", "create")
-            val (code, r) = Sync.tutorLesson(prefs, body)
-            runOnUiThread { tutorGotLesson(sd, code, r, attach); refresh() }
+            val (code, r) = try { Sync.tutorLesson(prefs, body) } catch (e: Exception) { Pair(-1, null) }
+            runOnUiThread { tutorGotQr(sd, code, r, attach, local, pageUrl); refresh() }
         }
     }
 

@@ -1,5 +1,5 @@
 import { admin, authDevice, cors, json } from '../_shared/common.ts';
-import { AiBusyError, callAI, extractLesson, extractPage, transcribeLessonAudio } from '../_shared/ai.ts';
+import { AiBusyError, callAI, extractLesson, extractPage, lessonFromAudio, transcribeLessonAudio } from '../_shared/ai.ts';
 import { safeFetch, SiteBlockedError, toBase64 } from '../_shared/net.ts';
 import { extractMedia, hostAllowed, isSafePublicUrl, isValidDay, nextSection, normalizePhrases, normalizeSections, parseJsonLoose, pickCached, splitSubject, subjectKey } from '../_shared/logic.ts';
 
@@ -10,6 +10,19 @@ const MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const AUDIO_TYPES: Record<string, string> = { 'audio/mpeg': 'audio/mp3', 'audio/mp3': 'audio/mp3', 'audio/mp4': 'audio/aac', 'audio/x-m4a': 'audio/aac', 'audio/aac': 'audio/aac', 'audio/wav': 'audio/wav', 'audio/x-wav': 'audio/wav', 'audio/ogg': 'audio/ogg' };
 const MAX_LESSONS_PER_DAY = 8;
 const MAX_AUDIO_BYTES = 12_000_000;
+
+/** Video/audio the phone found (incl. files the page's player requested); same host rules as the server's own finds. */
+function phoneMedia(body: any, hosts: string): any[] {
+  const arr = Array.isArray(body.qr_page?.media) ? body.qr_page.media.slice(0, 12) : [];
+  return arr.filter((m: any) => m && typeof m.url === 'string' && ['video', 'audio', 'page'].includes(m.type) && isSafePublicUrl(m.url) &&
+      (m.type === 'page' ? (hostAllowed(m.url, hosts) || /aparat\.com|youtube\.com\/embed|youtube-nocookie\.com/i.test(m.url)) : hostAllowed(m.url, hosts)))
+    .map((m: any) => ({ type: m.type, url: m.url, ...(typeof m.title === 'string' && m.title.trim() ? { title: m.title.trim().slice(0, 80) } : {}) }));
+}
+function mergeMedia(a: any[], b: any[]): any[] {
+  const seen = new Set(a.map(m => m.url));
+  // direct files first (they can be played part by part and listened to by the AI), pages last
+  return [...a, ...b.filter(m => !seen.has(m.url) && seen.add(m.url))].sort((x, y) => (x.type === 'page' ? 1 : 0) - (y.type === 'page' ? 1 : 0)).slice(0, 8);
+}
 
 /**
  * The QR page. The phone (inside Iran) fetches it first and sends it as qr_page, because many Iranian
@@ -49,6 +62,7 @@ Deno.serve(async (req) => {
       case 'attach_qr': return await attachQr(db, kid, body, hosts);
       case 'audio_dictation': return await audioDictation(db, kid, body, day, hosts, st);
       case 'add_page': return await addPage(db, kid, body);
+      case 'from_audio': return await fromAudio(db, kid, body);
       case 'text_dictation': return await textDictation(db, kid, body, day, st);
       default: return json({ error: 'bad_action' }, 400);
     }
@@ -62,7 +76,7 @@ Deno.serve(async (req) => {
 
 // School lessons and free classes are stored apart (body.track = 'school' | 'free'), same as the tutor function.
 const subjectOf = (b: any) => subjectKey(b.subject, b.track);
-const publicLesson = (l: any) => ({ id: l.id, subject: splitSubject(l.subject).name, track: splitSubject(l.subject).track, title: l.title, sections: l.sections, position: l.position, status: l.status, media: l.media, updated_at: l.updated_at, pages: l.pages ?? 0, has_content: !!(l.content && l.content.length > 20) });
+const publicLesson = (l: any) => ({ id: l.id, subject: splitSubject(l.subject).name, track: splitSubject(l.subject).track, title: l.title, sections: l.sections, position: l.position, status: l.status, media: l.media, updated_at: l.updated_at, pages: l.pages ?? 0, qr_url: l.qr_url ?? null, has_content: !!(l.content && l.content.length > 20) });
 const MAX_PAGES = 12;
 const MAX_CONTENT = 30_000;
 
@@ -79,7 +93,7 @@ async function create(db: any, kid: any, body: any, day: string, hosts: string) 
   const { count } = await db.from('tutor_lessons').select('id', { count: 'exact', head: true }).eq('kid_id', kid.id).gte('created_at', day);
   if ((count ?? 0) >= MAX_LESSONS_PER_DAY) return json({ error: 'daily_limit' }, 429);
 
-  let pageText = '', media: any[] = [];
+  let pageText = '', pageTitle = '', media: any[] = [];
   if (qr) {
     if (!isSafePublicUrl(qr)) return json({ error: 'bad_qr' }, 400);
     if (!hostAllowed(qr, hosts)) return json({ error: 'host_not_allowed', host: new URL(qr).hostname }, 403);
@@ -89,25 +103,43 @@ async function create(db: any, kid: any, body: any, day: string, hosts: string) 
     else if (page.contentType.startsWith('audio/')) media = [{ type: 'audio', url: page.finalUrl }];
     else {
       const html = page.html;
+      pageTitle = (/<title[^>]*>([^<]{1,160})<\/title>/i.exec(html)?.[1] ?? '').replace(/\s+/g, ' ').trim();
       pageText = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 6000);
       media = extractMedia(html, page.finalUrl).filter(m => m.type === 'page' || hostAllowed(m.url, hosts));
+      // what the phone's invisible browser saw after the page's scripts ran (text and the player's own files)
+      const seen = typeof body.qr_page?.text === 'string' ? body.qr_page.text.replace(/\s+/g, ' ').trim() : '';
+      if (seen.length > pageText.trim().length) pageText = seen.slice(0, 6000);
+      if (!pageTitle && typeof body.qr_page?.title === 'string') pageTitle = body.qr_page.title.replace(/\s+/g, ' ').trim().slice(0, 160);
     }
   }
 
-  let title = 'درس', sections: any[] = [], content = '';
-  if (img || pageText) {
-    const info = await extractLesson({ b64: img ?? undefined, mediaType, pageText: img ? undefined : pageText });
+  if (qr) media = mergeMedia(media, phoneMedia(body, hosts));
+  let title = 'درس', sections: any[] = [], content = '', aiFailed = false;
+  if (img) {
+    const info = await extractLesson({ b64: img, mediaType });
     if (!info.readable) return json({ status: 'retake', feedback: info.feedback || 'صفحه واضح نبود؛ دوباره عکس بگیر.' });
-    title = info.title; sections = info.sections;
-    content = info.content || (img ? '' : pageText.slice(0, 9000));
-  } else if (media.length) {
-    title = 'درس از QR';
+    title = info.title; sections = info.sections; content = info.content || '';
+  } else {
+    // QR: the AI reading the page is a bonus. If it fails, the lesson still keeps the page's video/audio,
+    // which the kid then watches part by part.
+    if (pageText.length > 80) {
+      try {
+        const info = await extractLesson({ pageText });
+        if (info.readable) { title = info.title; sections = info.sections; content = info.content || pageText.slice(0, 9000); }
+        else aiFailed = true;
+      } catch (e) { console.warn('QR lesson without AI: ' + (e as Error).message); aiFailed = true; }
+    } else aiFailed = true;
+    if (aiFailed) {
+      if (!media.length) return json({ status: 'nothing_found', url: qr });   // the phone opens the page itself
+      title = pageTitle || 'درس از QR';
+      content = pageText.length > 80 ? pageText.slice(0, 9000) : '';
+    }
   }
   const { data: row, error } = await db.from('tutor_lessons').insert({
     kid_id: kid.id, subject, title, sections, qr_url: qr || null, media, position: 0, content: content || null, pages: img ? 1 : 0,
   }).select('*').single();
   if (error) return json({ error: 'db_error' }, 500);
-  return json({ status: 'ok', lesson: publicLesson(row) });
+  return json({ status: 'ok', lesson: publicLesson(row), ai_failed: aiFailed });
 }
 
 async function list(db: any, kid: any, body: any) {
@@ -182,6 +214,7 @@ async function attachQr(db: any, kid: any, body: any, hosts: string) {
   else if (page.contentType.startsWith('audio/')) found = [{ type: 'audio', url: page.finalUrl }];
   else found = extractMedia(page.html, page.finalUrl).filter(m => m.type === 'page' || hostAllowed(m.url, hosts));
   const have = new Set((lesson.media ?? []).map((m: any) => m.url));
+  found = mergeMedia(found, phoneMedia(body, hosts));
   const media = [...(lesson.media ?? []), ...found.filter(m => !have.has(m.url))].slice(0, 8);
   const { data: upd } = await db.from('tutor_lessons').update({ media, qr_url: qr, updated_at: new Date().toISOString() }).eq('id', lesson.id).select('*').single();
   return json({ lesson: publicLesson(upd), added: media.length - (lesson.media ?? []).length });
@@ -204,6 +237,27 @@ async function addPage(db: any, kid: any, body: any) {
   if (!sections.length && page.sections.length) sections = normalizeSections(page.sections);
   const { data: upd } = await db.from('tutor_lessons').update({ content, pages: n, sections, updated_at: new Date().toISOString() }).eq('id', lesson.id).select('*').single();
   return json({ status: 'ok', lesson: publicLesson(upd) });
+}
+
+/**
+ * The lesson's video had no readable text: the phone separated the sound from the video (or downloaded the audio)
+ * and sends it; the AI listens and the lesson gets text, title and sections, so the tutor can teach from it.
+ */
+async function fromAudio(db: any, kid: any, body: any) {
+  const { data: lesson } = await db.from('tutor_lessons').select('*').eq('id', body.lesson_id).eq('kid_id', kid.id).maybeSingle();
+  if (!lesson) return json({ error: 'not_found' }, 404);
+  const b64 = typeof body.audio_b64 === 'string' ? body.audio_b64 : '';
+  if (b64.length < 1000) return json({ error: 'no_audio' }, 400);
+  if (b64.length > Math.ceil(MAX_AUDIO_BYTES * 4 / 3) + 16) return json({ error: 'too_large' }, 413);
+  const mime = AUDIO_TYPES[String(body.audio_type ?? '').split(';')[0].trim().toLowerCase()];
+  if (!mime) return json({ error: 'bad_audio_type' }, 415);
+  const info = await lessonFromAudio({ b64, mime, lessonTitle: lesson.title });
+  if (!info.readable) return json({ status: 'retake', feedback: 'هوش مصنوعی از صدای این فیلم درسی نفهمید.' });
+  const content = ((lesson.content ? lesson.content + '\n\n— از صدای فیلم درس —\n' : '') + info.content).slice(0, MAX_CONTENT);
+  const sections = (lesson.sections ?? []).length ? lesson.sections : info.sections;
+  const title = lesson.title === 'درس از QR' || !lesson.title ? info.title : lesson.title;
+  const { data: upd } = await db.from('tutor_lessons').update({ content, sections, title, updated_at: new Date().toISOString() }).eq('id', lesson.id).select('*').single();
+  return json({ status: 'ok', lesson: publicLesson(upd), partial: body.partial === true });
 }
 
 /** Dictation from the lesson's own text. The phrases are made by the AI once and reused; fresh = ask for a new passage. */

@@ -21,10 +21,11 @@ import kotlin.concurrent.thread
 fun MainActivity.lessonCall(kid: Kid, subject: String, body: JSONObject, always: Boolean = false, prepare: ((JSONObject) -> Unit)? = null, then: (Int, JSONObject?) -> Unit) {
     body.put("kid_id", kid.id).put("day", Sync.today()).put("subject", subject).put("track", TutorState.track)
     val gen = TutorState.gen
+    Waiting.begin(this)
     thread {
         try { prepare?.invoke(body) } catch (e: Exception) {}
-        val (code, r) = try { Sync.tutorLesson(prefs, body) } catch (e: Exception) { Pair(-1, null) }
-        runOnUiThread { deliver(gen, always) { then(code, r) } }
+        val (code, r) = try { Sync.tutorLesson(prefs, body, 90_000) { p -> if (p >= 100) Waiting.uploaded() } } catch (e: Exception) { Pair(-1, null) }
+        runOnUiThread { Waiting.end(); deliver(gen, always) { then(code, r) } }
     }
 }
 
@@ -76,7 +77,7 @@ fun MainActivity.tutorNewLesson(kid: Kid, subject: String) {
         addView(ui.text("۲) بعد می‌توانی QR کتاب را هم بگیری تا فیلم و صوت درس به همین درس اضافه شود.", 15f))
     })
     add(ui.pill("📷 عکس صفحه‌ی اول درس", Pal.ORANGE) { takePhoto("lessonpage", "") })
-    add(ui.pill("🔳 فقط QR کتاب", Pal.BLUE) { takePhoto("qr", "") })
+    add(ui.pill("🔳 فقط QR کتاب", Pal.BLUE) { startQr() })
 }
 
 fun MainActivity.tutorOpenLesson(kid: Kid, subject: String, lessonId: String) {
@@ -97,6 +98,15 @@ private fun MainActivity.tutorLessonHubUnsafe(kid: Kid, subject: String, lesson:
     val pos = lesson.optInt("position", 0)
     val pages = lesson.optInt("pages", 0)
     add(ui.text("📖 ${lesson.getString("title")}", 24f, Pal.INK, true))
+    val lessonMedia = mediaOf(lesson)
+    if (secs.length() == 0 && lessonMedia.isNotEmpty()) {
+        add(ui.card().apply {
+            addView(ui.text("🤖 هوش مصنوعی نتوانست متن این درس را بخواند. عیبی ندارد: فیلم و صدای درس را بخش به بخش ببین و گوش بده.", 15f))
+        })
+        add(ui.pill("▶ پخش بخش به بخش", Pal.PURPLE) { playMediaList(lessonMedia, lesson.getString("title"), lesson.optString("qr_url").takeIf { it.startsWith("http") }) })
+    }
+    if (!lesson.optBoolean("has_content") && lessonMedia.any { it.type == "audio" || it.type == "video" })
+        add(ui.pill("🎧 هوش مصنوعی درس را از صدای فیلم یاد بگیرد", Pal.GREEN) { lessonFromSound(kid, subject, lesson) })
     add(ui.text(if (lesson.optBoolean("has_content")) "📄 متن ${fa(maxOf(1, pages))} صفحه از کتاب ذخیره شده؛ درس و سوال‌ها از روی همین کتاب‌اند و دفعه‌های بعد از همان‌ها استفاده می‌شود."
         else "متن کتاب این درس هنوز ذخیره نشده؛ از صفحه‌های درس عکس بگیر تا درس از روی کتاب باشد.", 14f, Pal.MUTED))
 
@@ -142,9 +152,9 @@ private fun MainActivity.tutorLessonHubUnsafe(kid: Kid, subject: String, lesson:
             val m = media.getJSONObject(i)
             val url = m.getString("url")
             when (m.getString("type")) {
-                "video" -> add(ui.pill("▶ فیلم درس", Pal.PURPLE) { playVideo(url) })
+                "video" -> add(ui.pill("▶ فیلم درس (بخش به بخش)", Pal.PURPLE) { playParts(url, false, lesson.getString("title")) })
                 "page" -> add(ui.pill("▶ فیلم درس (صفحه‌ی وب)", Pal.PURPLE) { playWeb(url) })
-                "audio" -> { hasAudio = true; if (firstAudio == null) firstAudio = url; add(ui.pill("🎧 صوت درس", Pal.BLUE) { toggleAudio(url) }) }
+                "audio" -> { hasAudio = true; if (firstAudio == null) firstAudio = url; add(ui.pill("🎧 صوت درس (بخش به بخش)", Pal.BLUE) { playParts(url, true, lesson.getString("title")) }) }
             }
         }
     }
@@ -172,7 +182,92 @@ private fun MainActivity.tutorLessonHubUnsafe(kid: Kid, subject: String, lesson:
             refresh()
         }
     })
-    if (!isFree()) add(ui.pill("🔳 افزودن QR کتاب به این درس", Pal.MUTED) { takePhoto("qr", "") })
+    if (!isFree()) add(ui.pill("🔳 افزودن QR کتاب به این درس", Pal.MUTED) { startQr() })
+}
+
+fun mediaOf(lesson: JSONObject): List<MediaItem> {
+    val arr = lesson.optJSONArray("media") ?: return emptyList()
+    return (0 until arr.length()).mapNotNull { i -> arr.optJSONObject(i)?.let { MediaItem(it.optString("type"), it.optString("url"), it.optString("title")) } }
+        .filter { it.url.startsWith("http") && it.type in setOf("video", "audio", "page") }
+}
+
+/**
+ * The lesson has a video but no text: the phone takes only the sound out of the video (fast, no re-encoding),
+ * sends it, and the AI listens and writes the lesson's text, title and sections. Then the tutor can teach from it.
+ */
+fun MainActivity.lessonFromSound(kid: Kid, subject: String, lesson: JSONObject) = safely("lessonFromSound") {
+    val media = mediaOf(lesson).filter { it.type == "audio" || it.type == "video" }
+    val m = media.firstOrNull { it.type == "audio" } ?: media.firstOrNull()
+    if (m == null) { toast("فیلم یا صوتی برای گوش دادن نیست"); return@safely }
+    val sd = StatusDialog(this)
+    sd.steps("🎧", "هوش مصنوعی درس را از صدای فیلم یاد می‌گیرد",
+        listOf(if (m.type == "video") "جدا کردن صدای فیلم" else "گرفتن صوت درس", "فرستادن صدا", "گوش دادن هوش مصنوعی"))
+    sd.show(); sd.setStep(0, StatusDialog.ACTIVE)
+    val lid = lesson.getString("id")
+    thread {
+        val maxBytes = 11_500_000; val maxSec = 20 * 60
+        val got = AudioExtract.fromUrl(m.url, maxBytes, maxSec) { d, t ->
+            runOnUiThread { sd.setStep(0, StatusDialog.ACTIVE, if (t > 0) "${fa(d / 60)} از ${fa(maxOf(1, t / 60))} دقیقه" else "${fa(d / 60)} دقیقه") }
+        } ?: if (m.type == "audio") Sync.fetchPublic(m.url, maxBytes, "audio/*", 60_000)?.let { f ->
+            AudioExtract.Out(f.bytes, f.contentType.ifBlank { "audio/mpeg" }, 0, false)
+        } else null
+        if (got == null) {
+            runOnUiThread { sd.result("😕", "صدای این فیلم جدا نشد", "این فیلم را نمی‌شود این‌جا گوش داد. از صفحه‌ی کتاب عکس بگیر تا درس از روی کتاب باشد.", null, null) }
+            return@thread
+        }
+        val note = if (got.partial) "فقط ${fa(maxOf(1, got.seconds / 60))} دقیقه‌ی اول" else ""
+        runOnUiThread { sd.setStep(0, StatusDialog.DONE, note); sd.uploadProgress(0) }
+        val body = JSONObject().put("action", "from_audio").put("kid_id", kid.id).put("subject", subject).put("track", TutorState.track).put("day", Sync.today())
+            .put("lesson_id", lid).put("audio_type", got.mime).put("partial", got.partial)
+            .put("audio_b64", android.util.Base64.encodeToString(got.bytes, android.util.Base64.NO_WRAP))
+        var aiShown = false
+        val (code, r) = try {
+            Sync.tutorLesson(prefs, body, 170_000) { p -> runOnUiThread { if (p >= 100) { if (!aiShown) { aiShown = true; sd.waitingForAi(2) } } else sd.uploadProgress(p) } }
+        } catch (e: Exception) { Pair(-1, null) }
+        runOnUiThread {
+            when {
+                code == 200 && r != null && r.has("lesson") -> {
+                    val l = r.getJSONObject("lesson")
+                    sd.result("📚", "درس آماده شد!", "هوش مصنوعی صدای درس را گوش داد${if (note.isNotEmpty()) " ($note)" else ""}. حالا از روی همین درس یاد بگیر و تمرین کن.", null, null, "برو به درس") { tutorLessonHub(kid, subject, l) }
+                }
+                code == 200 && r?.optString("status") == "retake" -> sd.result("🤔", "هوش مصنوعی نفهمید", r.optString("feedback"), null, null)
+                code == 503 -> sd.result("⏳", "هوش مصنوعی شلوغ است", "یکی دو دقیقه بعد دوباره امتحان کن.", null, null)
+                code == 413 -> sd.result("📦", "صدا خیلی بزرگ است", "این فیلم برای گوش دادن خیلی طولانی است.", null, null)
+                code == 415 -> sd.result("😕", "این نوع صدا پشتیبانی نمی‌شود", "از صفحه‌ی کتاب عکس بگیر.", null, null)
+                else -> sd.result("📶", "نشد", "اینترنت را چک کن و دوباره امتحان کن.", null, null)
+            }
+        }
+    }
+}
+
+/** After a QR: the lesson, or — if the server/AI could not — the page's own video/audio part by part, or the page itself. */
+fun MainActivity.tutorGotQr(sd: StatusDialog, code: Int, r: JSONObject?, attached: Boolean, local: List<MediaItem>, pageUrl: String) =
+    safely("tutorGotQr") { tutorGotQrUnsafe(sd, code, r, attached, local, pageUrl) }
+
+private fun MainActivity.tutorGotQrUnsafe(sd: StatusDialog, code: Int, r: JSONObject?, attached: Boolean, local: List<MediaItem>, pageUrl: String) {
+    val kid = Sync.loadState(prefs)?.kids?.firstOrNull { it.id == TutorState.kidId }
+    val subject = TutorState.subject
+    if (code == 200 && r != null && r.has("lesson") && kid != null) {
+        if (r.optBoolean("ai_failed")) {
+            val l = r.getJSONObject("lesson")
+            sd.result("🎬", "هوش مصنوعی نتوانست متن درس را بخواند", "عیبی ندارد! فیلم و صدای درس ذخیره شد. بخش به بخش ببین و گوش بده.", null, null, "▶ پخش بخش به بخش") {
+                tutorLessonHub(kid, subject, l); playMediaList(mediaOf(l).ifEmpty { local }, l.optString("title"), pageUrl)
+            }
+        } else tutorGotLesson(sd, code, r, attached)
+        return
+    }
+    if (code == 403 || (code == 200 && r?.optString("status") == "retake")) { tutorGotLesson(sd, code, r, attached); return }
+    val why = when {
+        code == 200 && r?.optString("status") == "nothing_found" -> "هوش مصنوعی در این صفحه متنی برای درس پیدا نکرد."
+        code == 503 -> "هوش مصنوعی الان شلوغ است و نتوانست درس را بخواند."
+        code == 429 -> "امروز به سقف درس‌های جدید رسیدی."
+        code == -1 -> "به سرور وصل نشدیم."
+        else -> "هوش مصنوعی نتوانست درس را بخواند."
+    }
+    if (local.isNotEmpty())
+        sd.result("🎬", "فیلم و صدای درس آماده است", "$why\nولی فیلم و صدای همین QR را بخش به بخش ببین.", null, null, "▶ پخش بخش به بخش") { playMediaList(local, "درس از QR", pageUrl) }
+    else
+        sd.result("🌐", "خود صفحه‌ی کتاب را باز می‌کنیم", "$why\nصفحه‌ی همین QR را ببین.", null, null, "باز کن") { playWeb(pageUrl) }
 }
 
 /** Result of making a lesson from a photo or QR; also used when a QR is attached. */
@@ -232,6 +327,8 @@ private fun MainActivity.lessonDictation(kid: Kid, subject: String, lessonId: St
 }
 
 // ---------------- players ----------------
+private val LESSON_SITES = listOf("sch.ir", "roshd.ir", "medu.ir", "aparat.com")
+
 object MediaHolder { var audio: MediaPlayer? = null; var url: String = "" }
 
 fun MainActivity.stopMedia() { try { MediaHolder.audio?.stop(); MediaHolder.audio?.release() } catch (e: Exception) {}; MediaHolder.audio = null; MediaHolder.url = "" }
@@ -279,7 +376,11 @@ fun MainActivity.playWeb(url: String) {
     @Suppress("SetJavaScriptEnabled") web.settings.javaScriptEnabled = true
     web.settings.mediaPlaybackRequiresUserGesture = false
     web.webViewClient = object : WebViewClient() {
-        override fun shouldOverrideUrlLoading(v: WebView?, req: WebResourceRequest?): Boolean = req?.url?.host != host
+        // stay on the page's site or the school-book sites (QR links often redirect between them)
+        override fun shouldOverrideUrlLoading(v: WebView?, req: WebResourceRequest?): Boolean {
+            val h = req?.url?.host ?: return true
+            return !(h == host || LESSON_SITES.any { h == it || h.endsWith(".$it") })
+        }
     }
     frame.addView(web, FrameLayout.LayoutParams(-1, -1))
     frame.addView(ui.pill("✕ بستن", Pal.RED) { web.loadUrl("about:blank"); dlg.dismiss() },

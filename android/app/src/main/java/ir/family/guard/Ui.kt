@@ -59,7 +59,7 @@ class Ui(val ctx: Context) {
         background = gradient(color, darker(color), 26f, GradientDrawable.Orientation.TOP_BOTTOM); elevation = dpf(3f)
         setPadding(dp(18), dp(13), dp(18), dp(13)); isClickable = true
         layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) }
-        setOnClickListener { onClick() }
+        setOnClickListener { v -> Taps.view = v as TextView; Taps.at = System.currentTimeMillis(); onClick() }
     }
 
     fun chip(label: String, bg: Int, fg: Int = Color.WHITE) = TextView(ctx).apply {

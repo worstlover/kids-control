@@ -71,24 +71,58 @@ private fun MainActivity.removeWish(w: WishItem, kid: Kid) {
     }
 }
 
-/** Browse the allowed shops, or type a name; then ask for the price and add it to the wish list. */
+/**
+ * Reads the product on the page the kid is looking at: name, price from the page's structured data (schema.org Product or
+ * og price tags) and the visible text. No '$' in it: it is a Kotlin raw string.
+ */
+private const val READ_PAGE_JS = """(function(){try{
+var r={title:'',price:null,cur:'',img:'',text:''};
+var ld=document.querySelectorAll('script[type="application/ld+json"]');
+for(var i=0;i<ld.length;i++){try{var j=JSON.parse(ld[i].textContent);var arr=Array.isArray(j)?j:(j['@graph']||[j]);
+for(var k=0;k<arr.length;k++){var o=arr[k];if(!o)continue;var t=o['@type'];var isP=(t==='Product')||(Array.isArray(t)&&t.indexOf('Product')>=0);if(!isP)continue;
+r.title=r.title||o.name||'';var of=o.offers;if(Array.isArray(of))of=of[0];
+if(of){var p=of.price||of.lowPrice;if(p){r.price=Number(String(p).replace(/[^0-9.]/g,''));r.cur=String(of.priceCurrency||'').toUpperCase();}}
+var im=o.image;if(Array.isArray(im))im=im[0];if(im&&typeof im==='object')im=im.url;if(typeof im==='string')r.img=im;}}catch(e){}}
+var meta=function(n){var m=document.querySelector('meta[property="'+n+'"]')||document.querySelector('meta[name="'+n+'"]');return m?(m.getAttribute('content')||''):''};
+r.title=r.title||meta('og:title')||document.title||'';r.img=r.img||meta('og:image');
+var pm=meta('product:price:amount');if(!r.price&&pm){r.price=Number(String(pm).replace(/[^0-9.]/g,''));r.cur=String(meta('product:price:currency')).toUpperCase();}
+r.text=(document.body?document.body.innerText:'').replace(/\s+/g,' ').slice(0,5000);
+return JSON.stringify(r);}catch(e){return '{}';}})()"""
+
+/** Price in toman from what the page says, or null when the currency is unknown (then the server reads the page text). */
+private fun pagePriceToman(price: Double, cur: String): Long? = when {
+    price <= 0 -> null
+    cur == "IRR" -> (price / 10).toLong()
+    cur == "IRT" || cur == "TOMAN" || cur == "TMN" -> price.toLong()
+    else -> null
+}
+
+/** Browse the allowed shops (full screen, so the page scrolls), or type a name; then ask for the price and add it to the wish list. */
 fun MainActivity.shopScreen(kid: Kid) {
     box.removeAllViews()
     add(ui.pill("← آرزوها", Pal.MUTED) { wishView = null; render() })
     add(ui.text("🛍 بگرد و آرزو پیدا کن", 22f, Pal.INK, true))
-    add(ui.text("اسم چیزی که می‌خوای رو بنویس، یا توی فروشگاه بگرد و وقتی چیزی پسندیدی، دکمه‌ی «قیمتش رو بگیر» رو بزن.", 14f, Pal.MUTED))
+    add(ui.text("اسم چیزی که می‌خوای رو بنویس، یا فروشگاه رو باز کن، صفحه‌ی چیزی که دوست داری رو بیار و «قیمت همین صفحه» رو بزن.", 14f, Pal.MUTED))
 
+    val out = ui.card()
+    add(ui.pill("🛒 باز کردن فروشگاه", Pal.PINK) { openShop(kid, out) })
     val search = ui.card()
     val q = field("مثلاً: دوچرخه، هدفون بی‌سیم")
     search.addView(q)
-    val out = ui.card()
     search.addView(ui.pill("🔎 اسمش رو بگرد", Pal.BLUE) {
         val s = q.text.toString().trim()
         if (s.isNotEmpty()) lookupAndShow(kid, JSONObject().put("query", s), s, out)
     })
     add(search)
+    add(out)
+}
 
-    // Keep one browser for the whole session: render() runs on every refresh, and rebuilding the page each time reloads it forever.
+/** The shop in a full-screen window: a web page inside the app's scrolling screen cannot scroll, so it gets the whole screen. */
+private fun MainActivity.openShop(kid: Kid, out: LinearLayout) {
+    val dlg = android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+    val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(android.graphics.Color.WHITE); layoutDirection = View.LAYOUT_DIRECTION_RTL }
+    val bar = ui.row().apply { setPadding(ui.dp(8), ui.dp(8), ui.dp(8), ui.dp(8)) }
+    // Keep one browser for the whole session so the kid's place in the shop is not lost.
     val web = (shopWeb ?: WebView(this).apply {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true      // shop sites like Digikala render blank without it
@@ -103,14 +137,28 @@ fun MainActivity.shopScreen(kid: Kid) {
         loadUrl(SHOP_HOME)
     }.also { shopWeb = it })
     (web.parent as? android.view.ViewGroup)?.removeView(web)
-    web.layoutParams = LinearLayout.LayoutParams(-1, ui.dp(380)).apply { topMargin = ui.dp(10) }
-    add(web)
-    add(ui.pill("📌 این صفحه رو بفرست و قیمتش رو بگیر", Pal.ORANGE) {
+    bar.addView(ui.pill("✕ بستن", Pal.MUTED) { dlg.dismiss() }.apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = ui.dp(6) } })
+    bar.addView(ui.pill("→ قبلی", Pal.BLUE) { if (web.canGoBack()) web.goBack() }.apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = ui.dp(6) } })
+    root.addView(bar, LinearLayout.LayoutParams(-1, -2))
+    root.addView(web, LinearLayout.LayoutParams(-1, 0, 1f))
+    val take = ui.pill("📌 قیمت همین صفحه رو بگیر", Pal.ORANGE) {
         val u = web.url ?: ""
-        if (hostOk(u)) lookupAndShow(kid, JSONObject().put("url", u), null, out)
-        else toast("اول یه صفحه‌ی محصول توی فروشگاه باز کن")
-    })
-    add(out)
+        if (!hostOk(u)) return@pill toast("اول یه صفحه‌ی محصول توی فروشگاه باز کن")
+        web.evaluateJavascript(READ_PAGE_JS) { raw ->
+            val page = try { JSONObject(org.json.JSONArray("[$raw]").getString(0)) } catch (e: Exception) { JSONObject() }
+            val req = JSONObject().put("url", u)
+                .put("page_title", page.optString("title"))
+                .put("page_image", page.optString("img"))
+                .put("page_text", page.optString("text"))
+            pagePriceToman(page.optDouble("price", 0.0), page.optString("cur"))?.let { req.put("page_price_toman", it) }
+            dlg.dismiss()
+            lookupAndShow(kid, req, page.optString("title").takeIf { it.isNotBlank() }, out)
+        }
+    }
+    root.addView(take, LinearLayout.LayoutParams(-1, -2).apply { setMargins(ui.dp(10), ui.dp(6), ui.dp(10), ui.dp(10)) })
+    dlg.setContentView(root)
+    dlg.setOnDismissListener { (web.parent as? android.view.ViewGroup)?.removeView(web) }
+    dlg.show()
 }
 
 private fun MainActivity.lookupAndShow(kid: Kid, req: JSONObject, fallbackTitle: String?, out: LinearLayout) {
@@ -127,7 +175,7 @@ private fun MainActivity.showLookup(kid: Kid, code: Int, r: JSONObject?, out: Li
     out.removeAllViews()
     if (code != 200 || r == null) {
         out.addView(ui.text(
-            if (code == 409) "آرزوهات پر شده؛ اول یکی رو حذف کن" else "نتونستم پیدا کنم. اسمش رو دقیق‌تر بنویس یا یه صفحه‌ی دیگه باز کن 🔄",
+            when (code) { 409 -> "آرزوهات پر شده؛ اول یکی رو حذف کن"; 429 -> "امروز زیاد قیمت گرفتی؛ فردا دوباره 🌙"; else -> "نتونستم پیدا کنم. اسمش رو دقیق‌تر بنویس یا یه صفحه‌ی دیگه باز کن 🔄" },
             15f, Pal.RED))
         return
     }

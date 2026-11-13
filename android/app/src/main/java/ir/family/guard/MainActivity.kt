@@ -263,6 +263,8 @@ class MainActivity : Activity() {
 
         }
         if (kidTab == "points") {
+        // ---- wallet: where points came from, where they went, spending ----
+        walletSection(st, kid)
         // ---- competition charts ----
         if (st.kids.size > 1 || kid.weekPoints.isNotEmpty()) chartCards(st, kidIdx)
 
@@ -480,8 +482,9 @@ class MainActivity : Activity() {
         if (kind == "qr") { handleQrPhoto(uri); return }
 
         val sd = StatusDialog(this)
-        sd.steps(if (kind == "book" || kind == "lessonpage") "📖" else "🤖", if (kind == "book" || kind == "lessonpage") "دارم صفحه‌ی کتاب را می‌خوانم" else "هوش مصنوعی داره تکلیفت رو نمره می‌ده",
-            listOf("آماده کردن عکس", "فرستادن عکس", if (kind == "book" || kind == "lessonpage") "خواندن متن توسط هوش مصنوعی" else "بررسی توسط هوش مصنوعی"))
+        val isBook = kind == "book" || kind == "lessonpage" || kind == "lessonadd"
+        sd.steps(if (isBook) "📖" else "🤖", if (isBook) "دارم صفحه‌ی کتاب را می‌خوانم" else "هوش مصنوعی داره تکلیفت رو نمره می‌ده",
+            listOf("آماده کردن عکس", "فرستادن عکس", if (isBook) "خواندن متن توسط هوش مصنوعی" else "بررسی توسط هوش مصنوعی"))
         sd.show(); sd.setStep(0, StatusDialog.ACTIVE)
         thread {
             val b64 = try { loadScaledB64(uri) } catch (e: Exception) { null }
@@ -494,6 +497,7 @@ class MainActivity : Activity() {
                 "book" -> Sync.dictCreate(prefs, id, b64, progress)
                 "dict" -> Sync.submitDictation(prefs, id, b64, progress)
                 "lessonpage" -> Sync.tutorLesson(prefs, JSONObject().put("action", "create").put("kid_id", TutorState.kidId).put("subject", TutorState.subject).put("track", TutorState.track).put("day", Sync.today()).put("image_b64", b64).put("media_type", "image/jpeg"), 90_000, progress)
+                "lessonadd" -> Sync.tutorLesson(prefs, JSONObject().put("action", "add_page").put("kid_id", TutorState.kidId).put("subject", TutorState.subject).put("track", TutorState.track).put("day", Sync.today()).put("lesson_id", id).put("image_b64", b64).put("media_type", "image/jpeg"), 90_000, progress)
                 "solution" -> Sync.tutor(prefs, JSONObject().put("action", "check").put("kid_id", TutorState.kidId).put("subject", TutorState.subject).put("track", TutorState.track)
                     .put("day", Sync.today()).put("exercise_id", id).put("answers", org.json.JSONArray(TutorState.drafts[id] ?: emptyList<String>()))
                     .put("image_b64", b64).put("media_type", "image/jpeg"))
@@ -503,6 +507,7 @@ class MainActivity : Activity() {
             runOnUiThread {
                 if (kind == "dict" && code == 200 && r?.optString("status") != "retake") dictSession = null
                 if (kind == "lessonpage") tutorGotLesson(sd, code, r, false)
+                else if (kind == "lessonadd") tutorGotLesson(sd, code, r, false, page = true)
                 else if (kind == "tutor") { sd.dismiss(); tutorGotExplain(code, r) }
                 else if (kind == "solution") { sd.dismiss(); tutorGotSolution(code, r, id) }
                 else if (kind == "book") bookResult(sd, code, r) else gradeResult(sd, code, r)

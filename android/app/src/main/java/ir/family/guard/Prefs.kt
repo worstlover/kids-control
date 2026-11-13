@@ -47,6 +47,13 @@ class Prefs(ctx: Context) {
     var bgPath: String
         get() = sp.getString("bgPath", "") ?: ""
         set(v) { sp.edit().putString("bgPath", v).apply() }
+    /** Hourly reminder: the last "day:hour" it was considered, and the sample rate of the saved voice line. */
+    var remindLast: String
+        get() = sp.getString("remindLast", "") ?: ""
+        set(v) { sp.edit().putString("remindLast", v).apply() }
+    var reminderRate: Int
+        get() = sp.getInt("reminderRate", 24000)
+        set(v) { sp.edit().putInt("reminderRate", v).apply() }
     val parentUnlocked get() = System.currentTimeMillis() < parentUntil
     val inGrace get() = System.currentTimeMillis() < graceUntil
     val configured get() = token.isNotEmpty() && sbUrl.isNotEmpty()

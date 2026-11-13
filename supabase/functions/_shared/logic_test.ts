@@ -206,3 +206,32 @@ Deno.test('tutor level + points', () => {
   assertEquals(L.answerPoints(true, false), 0);
   assertEquals(L.answerPoints(false, true), 0);
 });
+Deno.test('wallet: spend cost and breakdown', () => {
+  assertEquals(L.spendCost(25_000, 1000, 'snack'), { points: 25, gift: 0, net: 25 });
+  assertEquals(L.spendCost(25_500, 1000, 'fun'), { points: 26, gift: 0, net: 26 });
+  assertEquals(L.spendCost(100_000, 1000, 'invest'), { points: 100, gift: 20, net: 80 });
+  assertEquals(L.spendCost(10, 1000, 'snack').points, 1);
+  assertEquals(L.ledgerSource({ reason: 'task', delta: 5, note: 'دیکته: آب' }), 'dictation');
+  assertEquals(L.ledgerSource({ reason: 'task', delta: 3, note: 'آزمون خروج: math' }), 'tutor');
+  assertEquals(L.ledgerSource({ reason: 'task', delta: 10, note: 'مسواک' }), 'tasks');
+  assertEquals(L.ledgerSource({ reason: 'manual', delta: -2 }), 'penalty');
+  assertEquals(L.ledgerSource({ reason: 'spend', delta: -5, category: 'fun' }), 'fun');
+  const b = L.walletBreakdown([
+    { reason: 'task', delta: 10, note: 'مسواک' }, { reason: 'task', delta: 4, note: 'تمرین معلم: math' }, { reason: 'screen_bonus', delta: 3 },
+    { reason: 'penalty', delta: -2 }, { reason: 'spend', delta: -5, category: 'snack', amount_toman: 5000 },
+    { reason: 'invest_gift', delta: 2 }, { reason: 'spend', delta: -10, category: 'invest', amount_toman: 10000 },
+  ]);
+  assertEquals(b.earned, { tasks: 10, tutor: 4, bonus: 3, invest_gift: 2 });
+  assertEquals(b.spent, { snack: 5, invest: 10 });
+  assertEquals(b.spentToman, { snack: 5000, invest: 10000 });
+  assertEquals([b.penalties, b.balance], [2, 2]);
+});
+Deno.test('tutor: answer matching and cache pick', () => {
+  assertEquals(L.sameAnswer('  كتاب، ', 'کتاب'), true);
+  assertEquals(L.sameAnswer('۱۲', '12'), true);
+  assertEquals(L.sameAnswer('', ''), false);
+  assertEquals(L.sameAnswer('دو', 'سه'), false);
+  assertEquals(L.pickCached([{ uses: 2, created_at: '2026-01-01' }, { uses: 0, created_at: '2026-02-01' }, { uses: 0, created_at: '2026-01-15' }])?.created_at, '2026-01-15');
+  assertEquals(L.pickCached([]), null);
+  assertEquals(L.topicKey('  کسر چیست؟ '), 'topic:کسر چیست');
+});

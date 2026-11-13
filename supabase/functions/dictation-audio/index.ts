@@ -1,6 +1,6 @@
 import { admin, authDevice, cors, json } from '../_shared/common.ts';
 import { speak } from '../_shared/ai.ts';
-import { countDictationDoneToday, isValidDay } from '../_shared/logic.ts';
+import { countDictationDoneToday, isValidDay, reminderText } from '../_shared/logic.ts';
 
 // deno-lint-ignore-file no-explicit-any
 Deno.serve(async (req) => {
@@ -11,6 +11,18 @@ Deno.serve(async (req) => {
   const db = admin();
   if (!(await authDevice(db, body.token))) return json({ error: 'unauthorized' }, 401);
   if (!isValidDay(body.day)) return json({ error: 'bad_day' }, 400);
+
+  // The hourly "your tasks are waiting" line, spoken with the kid's name. The text is fixed here (never taken from the phone);
+  // the phone keeps the audio and asks again only when the name changes.
+  if (body.kind === 'reminder') {
+    const { data: kid } = await db.from('kids').select('id,name').eq('id', body.kid_id).eq('active', true).maybeSingle();
+    if (!kid) return json({ error: 'kid_not_found' }, 404);
+    const text = reminderText(kid.name);
+    try {
+      const a = await speak(text);
+      return json({ text, audio_b64: a.data, sample_rate: a.sampleRate });
+    } catch (e) { console.error(e); return json({ error: 'tts_unavailable', text }, 502); }
+  }
 
   const { data: d } = await db.from('dictations').select('*').eq('id', body.dictation_id).maybeSingle();
   if (!d) return json({ error: 'not_found' }, 404);

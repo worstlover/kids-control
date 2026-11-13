@@ -382,6 +382,87 @@ function answerPoints(correct: boolean, firstTry: boolean, exit = false): number
   return (firstTry ? 1 : 0) * (exit ? 2 : 1);
 }
 
+// ---- Kid wallet ----
+type SpendCategory = 'snack' | 'fun' | 'invest';
+const SPEND_CATEGORIES: SpendCategory[] = ['snack', 'fun', 'invest'];
+const INVEST_GIFT = 0.2;   // parents add 20% of an investment as a gift
+
+/**
+ * What a spend costs in points. Snacks and fun/toys: the toman amount in points, rounded up.
+ * Investment: the same points are spent, but the parents first give 20% of it as a gift, so the kid's balance drops by 80%.
+ */
+function spendCost(amountToman: number, tomanPerPoint: number, category: SpendCategory) {
+  const rate = tomanPerPoint > 0 ? tomanPerPoint : 1000;
+  const points = Math.max(1, Math.ceil(amountToman / rate));
+  const gift = category === 'invest' ? Math.round(points * INVEST_GIFT) : 0;
+  return { points, gift, net: points - gift };
+}
+
+type LedgerSource = 'tasks' | 'dictation' | 'tutor' | 'bonus' | 'gift' | 'invest_gift' | 'penalty' | 'payout' | 'snack' | 'fun' | 'invest' | 'other';
+
+/** Where one ledger row came from, in words a kid understands (labels in the app). */
+function ledgerSource(r: { reason: string; delta: number; note?: string | null; category?: string | null }): LedgerSource {
+  const note = r.note ?? '';
+  switch (r.reason) {
+    case 'task':
+      if (note.startsWith('دیکته')) return 'dictation';
+      if (/^(تمرین معلم|کلاس آزاد|آزمون خروج|جواب روی تخته|یاد دادن)/.test(note)) return 'tutor';
+      return 'tasks';
+    case 'screen_bonus': return 'bonus';
+    case 'manual': return r.delta >= 0 ? 'gift' : 'penalty';
+    case 'penalty': return 'penalty';
+    case 'payout': return 'payout';
+    case 'invest_gift': return 'invest_gift';
+    case 'spend': return (SPEND_CATEGORIES as string[]).includes(r.category ?? '') ? (r.category as LedgerSource) : 'other';
+    default: return 'other';
+  }
+}
+
+/** Earned (by source) and spent (by category) totals over ledger rows. */
+function walletBreakdown(rows: { reason: string; delta: number; note?: string | null; category?: string | null; amount_toman?: number | null }[]) {
+  const earned: Record<string, number> = {}, spent: Record<string, number> = {}, spentToman: Record<string, number> = {};
+  let penalties = 0, payouts = 0;
+  for (const r of rows) {
+    const s = ledgerSource(r);
+    if (s === 'penalty') penalties += -r.delta;
+    else if (s === 'payout') payouts += -r.delta;
+    else if (r.reason === 'spend') { spent[s] = (spent[s] ?? 0) + -r.delta; spentToman[s] = (spentToman[s] ?? 0) + (r.amount_toman ?? 0); }
+    else if (r.delta > 0) earned[s] = (earned[s] ?? 0) + r.delta;
+  }
+  return { earned, spent, spentToman, penalties, payouts, balance: rows.reduce((a, r) => a + r.delta, 0) };
+}
+
+// ---- Tutor: reuse what the AI already made ----
+/** Answers compared loosely (Persian/Arabic letters and digits, spaces, punctuation, case) so an exact answer needs no AI check. */
+function normAnswer(s: unknown): string {
+  return String(s ?? '')
+    .replace(/[يى]/g, 'ی').replace(/ك/g, 'ک').replace(/[ۀة]/g, 'ه').replace(/[أإآ]/g, 'ا')
+    .replace(/[۰-۹]/g, d => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d))).replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[ً-ْ‌‏]/g, '')
+    .replace(/[.,،؛;:!?؟«»"'()\-_]/g, ' ')
+    .replace(/\s+/g, ' ').trim().toLowerCase();
+}
+function sameAnswer(a: unknown, b: unknown): boolean {
+  const x = normAnswer(a), y = normAnswer(b);
+  return !!x && x === y;
+}
+
+/** From saved items of one kind, the least used one (oldest first on a tie). */
+function pickCached<T extends { uses: number; created_at: string }>(rows: T[]): T | null {
+  if (!rows.length) return null;
+  return rows.slice().sort((a, b) => a.uses - b.uses || a.created_at.localeCompare(b.created_at))[0];
+}
+
+function topicKey(text: string): string {
+  return 'topic:' + normAnswer(text).slice(0, 120);
+}
+
+// ---- Hourly reminder ----
+/** What the phone says when tasks are waiting. */
+function reminderText(name: string): string {
+  return `${String(name ?? '').trim().slice(0, 30)} جان، کارهات منتظرتن. نمیای؟`;
+}
+
 // ---- shared/common ----
 const cors = {
   'Access-Control-Allow-Origin': '*',

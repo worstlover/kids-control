@@ -94,21 +94,43 @@ private fun MainActivity.tutorLessonHubUnsafe(kid: Kid, subject: String, lesson:
     val lid = lesson.getString("id")
     val secs = lesson.getJSONArray("sections")
     val pos = lesson.optInt("position", 0)
+    val pages = lesson.optInt("pages", 0)
     add(ui.text("📖 ${lesson.getString("title")}", 24f, Pal.INK, true))
+    add(ui.text(if (lesson.optBoolean("has_content")) "📄 متن ${fa(maxOf(1, pages))} صفحه از کتاب ذخیره شده؛ درس و سوال‌ها از روی همین کتاب‌اند و دفعه‌های بعد از همان‌ها استفاده می‌شود."
+        else "متن کتاب این درس هنوز ذخیره نشده؛ از صفحه‌های درس عکس بگیر تا درس از روی کتاب باشد.", 14f, Pal.MUTED))
 
-    if (secs.length() > 0) {
-        add(ui.title("این درس چه بخش‌هایی دارد"))
+    // The section the kid works on: the one they tapped, else where they left off.
+    val n = secs.length()
+    val sel = (TutorState.sectionPick[lid] ?: pos).coerceIn(0, maxOf(0, n - 1))
+    if (n > 0) {
+        add(ui.title("بخش‌های درس (روی هر بخش بزن)"))
         add(ui.card().apply {
-            for (i in 0 until secs.length()) {
+            for (i in 0 until n) {
                 val s = secs.getJSONObject(i)
-                val icon = if (s.getBoolean("done")) "✅" else if (i == pos) "▶️" else "⚪"
+                val icon = if (s.getBoolean("done")) "✅" else if (i == sel) "▶️" else "⚪"
                 val extra = if (s.getInt("asked") > 0) "  (${fa(s.getInt("correct"))} از ${fa(s.getInt("asked"))} درست)" else ""
-                addView(ui.text("$icon ${s.getString("title")}$extra", 16f, if (i == pos) Pal.PURPLE else Pal.INK, i == pos))
+                addView(ui.text("$icon ${s.getString("title")}$extra", 16f, if (i == sel) Pal.PURPLE else Pal.INK, i == sel).apply {
+                    setPadding(0, ui.dp(6), 0, ui.dp(6))
+                    setOnClickListener { TutorState.sectionPick[lid] = i; tutorLessonHub(kid, subject, lesson) }
+                })
             }
         })
-        val title = secs.getJSONObject(pos.coerceIn(0, secs.length() - 1)).getString("title")
-        add(ui.pill("🎯 تمرین بخش «$title»", Pal.GREEN) { tutorPractice(kid, subject, title, lid, pos) })
-    } else add(ui.card().apply { addView(ui.text("بخش‌ها هنوز مشخص نیست. عکس صفحه‌ی اول درس را بگیر.", 14f, Pal.MUTED)) })
+    }
+    val secTitle = if (n > 0) secs.getJSONObject(sel).getString("title") else lesson.getString("title")
+    add(ui.card().apply {
+        addView(ui.text("📌 $secTitle", 18f, Pal.INK, true))
+        addView(ui.text("اول از روی کتاب یاد بگیر، بعد جواب بده:", 14f, Pal.MUTED))
+        addView(ui.pill("① 🖍 درس این بخش از روی کتاب", Pal.PURPLE) { tutorTeach(kid, subject, lid, sel, secTitle, false) })
+        addView(ui.pill("② 🎯 سوال از همین بخش", Pal.GREEN) { tutorPractice(kid, subject, secTitle, lid, sel) })
+        addView(ui.text("می‌خوای بیشتر یاد بگیری؟ (این‌ها از هوش مصنوعی کمک می‌گیرن)", 13f, Pal.MUTED).apply { setPadding(0, ui.dp(10), 0, 0) })
+        addView(ui.pill("✨ یه چیز تازه از این بخش یادم بده", Pal.BLUE) { tutorTeach(kid, subject, lid, sel, secTitle, true) })
+        addView(ui.pill("✨ سوال‌های تازه بپرس", Pal.BLUE) { tutorPractice(kid, subject, secTitle, lid, sel, fresh = true) })
+    })
+    if (lesson.optBoolean("has_content")) {
+        add(ui.pill("✏️ دیکته از متن همین درس", Pal.ORANGE) { lessonDictation(kid, subject, lid, false) })
+        add(ui.pill("✨ دیکته‌ی تازه از بخش دیگری از متن", Pal.MUTED) { lessonDictation(kid, subject, lid, true) })
+    }
+    add(ui.pill("📷 صفحه‌ی بعدی کتاب را اضافه کن", Pal.BLUE) { TutorState.lessonId = lid; takePhoto("lessonadd", lid) })
 
     val media = lesson.optJSONArray("media")
     var hasAudio = false
@@ -143,22 +165,56 @@ private fun MainActivity.tutorLessonHubUnsafe(kid: Kid, subject: String, lesson:
 }
 
 /** Result of making a lesson from a photo or QR; also used when a QR is attached. */
-fun MainActivity.tutorGotLesson(sd: StatusDialog, code: Int, r: JSONObject?, attached: Boolean) = safely("tutorGotLesson") { tutorGotLessonUnsafe(sd, code, r, attached) }
+fun MainActivity.tutorGotLesson(sd: StatusDialog, code: Int, r: JSONObject?, attached: Boolean, page: Boolean = false) = safely("tutorGotLesson") { tutorGotLessonUnsafe(sd, code, r, attached, page) }
 
-private fun MainActivity.tutorGotLessonUnsafe(sd: StatusDialog, code: Int, r: JSONObject?, attached: Boolean) {
+private fun MainActivity.tutorGotLessonUnsafe(sd: StatusDialog, code: Int, r: JSONObject?, attached: Boolean, page: Boolean) {
     val kid = Sync.loadState(prefs)?.kids?.firstOrNull { it.id == TutorState.kidId }
     val subject = TutorState.subject
     when {
         code == 200 && r != null && r.has("lesson") && kid != null -> {
             val l = r.getJSONObject("lesson")
-            val body = if (attached) "فیلم و صوت اضافه شد: ${fa(r.optInt("added"))} مورد." else "${fa(l.getJSONArray("sections").length())} بخش پیدا شد."
-            sd.result("📚", if (attached) "QR اضافه شد" else l.getString("title"), body, null, null, "برو به درس") { tutorLessonHub(kid, subject, l) }
+            val body = when {
+                page -> "متن صفحه به درس اضافه شد (${fa(l.optInt("pages"))} صفحه)."
+                attached -> "فیلم و صوت اضافه شد: ${fa(r.optInt("added"))} مورد."
+                else -> "${fa(l.getJSONArray("sections").length())} بخش پیدا شد و متن کتاب ذخیره شد. حالا از بخش اول، درس را از روی کتاب یاد بگیر."
+            }
+            sd.result("📚", if (page) "صفحه اضافه شد" else if (attached) "QR اضافه شد" else l.getString("title"), body, null, null, "برو به درس") { tutorLessonHub(kid, subject, l) }
         }
         code == 200 && r?.optString("status") == "retake" -> sd.result("📷", "صفحه واضح نبود", r.optString("feedback"), null, null, "دوباره می‌گیرم")
         code == 403 -> sd.result("🚫", "این لینک مجاز نیست", "آدرس «${r?.optString("host") ?: ""}» را پدر و مادر باید اجازه بدهند.", null, null)
-        code == 400 -> sd.result("🤔", "این QR درست نیست", "QR کتاب درسی را بگیر.", null, null)
-        code == 429 -> sd.result("🌙", "امروز دیگه بسه", "به سقف درس‌های جدید امروز رسیدی؛ فردا دوباره.", null, null)
+        code == 400 -> sd.result("🤔", if (page) "عکس خوانده نشد" else "این QR درست نیست", if (page) "دوباره واضح‌تر عکس بگیر." else "QR کتاب درسی را بگیر.", null, null)
+        code == 429 -> sd.result("🌙", "امروز دیگه بسه", if (page) "این درس به سقف ۱۲ صفحه رسیده." else "به سقف درس‌های جدید امروز رسیدی؛ فردا دوباره.", null, null)
         else -> sd.result("📶", "نشد", "اینترنت را چک کن و دوباره امتحان کن. درس‌هایی که قبلاً ساخته‌ای سر جایشان هستند.", null, null)
+    }
+}
+
+/** A lesson section taught on the blackboard from the book (saved after the first time; fresh = something new). */
+fun MainActivity.tutorTeach(kid: Kid, subject: String, lessonId: String, section: Int, title: String, fresh: Boolean) {
+    keepScreen { tutorTeach(kid, subject, lessonId, section, title, fresh) }
+    clearTutor()
+    tutorBack(kid)
+    add(ui.text("🖍 $title", 22f, Pal.INK, true))
+    add(ui.text(if (fresh) "⏳ معلم دارد یک چیز تازه از همین بخش آماده می‌کند…" else "⏳ معلم دارد درس را از روی کتاب آماده می‌کند…", 15f, Pal.MUTED))
+    tutorCall(kid, JSONObject().put("action", "teach").put("subject", subject).put("lesson_id", lessonId).put("section", section).put("fresh", fresh)) { code, r ->
+        if (code != 200 || r == null) return@tutorCall tutorError(kid, subject, code)
+        tutorBoard(kid, subject, r, title)
+    }
+}
+
+/** Dictation from the lesson's own text: the saved one first; fresh = another passage of the book. */
+private fun MainActivity.lessonDictation(kid: Kid, subject: String, lessonId: String, fresh: Boolean) {
+    toast("⏳ دارم دیکته رو آماده می‌کنم…")
+    lessonCall(kid, subject, JSONObject().put("action", "text_dictation").put("lesson_id", lessonId).put("fresh", fresh), always = true) { code, r ->
+        val msg = when {
+            code == 200 && r?.optString("status") == "review" -> "دیکته آماده شد (${fa(r.optInt("phrase_count"))} جمله).\nبعد از تایید پدر و مادر، از صفحه‌ی «کارها» شروعش کن."
+            code == 200 && r?.optString("status") == "ready" -> "دیکته آماده است! از صفحه‌ی «کارها»، بخش دیکته، شروعش کن."
+            code == 200 -> r?.optString("feedback")?.takeIf { it.isNotEmpty() } ?: "از این متن دیکته‌ای درنیامد."
+            code == 409 -> "اول از صفحه‌های درس عکس بگیر تا متن کتاب ذخیره شود."
+            code == 429 -> "امروز به اندازه‌ی کافی دیکته‌ی جدید گرفتی؛ فردا دوباره."
+            else -> "الان نشد؛ کمی بعد دوباره امتحان کن."
+        }
+        AlertDialog.Builder(this).setMessage(msg).setPositiveButton("باشه", null).show()
+        refresh()
     }
 }
 

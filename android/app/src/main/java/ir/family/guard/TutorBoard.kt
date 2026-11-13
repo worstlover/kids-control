@@ -166,6 +166,7 @@ private fun MainActivity.tutorBoardUnsafe(kid: Kid, subject: String, r: JSONObje
     val prog = TutorState.boards.getOrPut(exId) { BoardProgress() }
     prog.idx = prog.idx.coerceIn(0, maxOf(0, n - 1))
     add(ui.text("🖍 ${r.optString("title")}", 22f, Pal.INK, true))
+    if (r.optBoolean("reused")) add(ui.text("♻️ این درس از قبل ذخیره شده بود (بدون هوش مصنوعی). برای توضیح تازه، از صفحه‌ی درس «یه چیز تازه یادم بده» را بزن.", 13f, Pal.MUTED))
 
     val web = chalkBoard()
     val counter = ui.text("", 14f, Pal.MUTED)

@@ -106,6 +106,7 @@ Deno.serve(async (req) => {
     toman_per_point: st?.toman_per_point ?? 1000,
     kids: (kids ?? []).map((k: any) => ({
       id: k.id, name: k.name, pin_hash: k.pin_hash, daily_limit_min: k.daily_limit_min,
+      reminder_on: k.reminder_on ?? true, reminder_quiet: k.reminder_quiet ?? '23-10,14-18',
       balance: bal[k.id] ?? 0,
       week_points: weekPoints((ledger ?? []).filter((r: any) => r.kid_id === k.id), days),
       screen_min_today: screenMin(k.id),

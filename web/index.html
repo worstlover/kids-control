@@ -195,7 +195,17 @@ const views = {
     const wk = new Date(Date.now() - 7 * 864e5).toISOString();
     const week = (data || []).filter(r => r.created_at > wk && r.delta > 0).reduce((a, r) => a + r.delta, 0);
     const bal = await balance(kid.id);
-    return `<div class="card"><div class="big">${fa(bal)}</div><div class="m">این هفته: +${fa(week)}</div>
+    // The kid's own spends from the phone (snack / fun / investment with the 20% gift); a parent can undo one.
+    const { data: spends } = await sb.from('points_ledger').select('*').eq('kid_id', kid.id).in('reason', ['spend', 'invest_gift']).order('created_at', { ascending: false }).limit(80);
+    const giftOf = {}; (spends || []).filter(r => r.reason === 'invest_gift').forEach(r => { giftOf[r.ref_id] = r.delta; });
+    const CAT = { snack: '🍫 خوراکی', fun: '🧸 سرگرمی و اسباب‌بازی', invest: '📈 سرمایه‌گذاری' };
+    const sp = (spends || []).filter(r => r.reason === 'spend');
+    const byCat = {}; sp.forEach(r => { const c = byCat[r.category] || (byCat[r.category] = { pts: 0, toman: 0 }); c.pts += -r.delta; c.toman += r.amount_toman || 0; });
+    const spendCard = `<div class="card"><b>💸 خرج‌های بچه</b><div class="m">خرج از گوشی همان لحظه از امتیاز کم می‌شود؛ برای سرمایه‌گذاری ۲۰٪ هدیه‌ی شما خودکار اضافه می‌شود.</div>
+      ${Object.keys(byCat).length ? `<div class="row" style="margin-top:8px">${Object.entries(byCat).map(([k, v]) => `<div><div class="m">${CAT[k] || k}</div><b>${fa(v.toman)} تومان</b><div class="m">${fa(v.pts)} امتیاز</div></div>`).join('')}</div>` : ''}
+      ${sp.slice(0, 20).map(r => `<div class="row" style="margin-top:8px;border-top:1px solid var(--b);padding-top:8px"><span style="flex:1">${CAT[r.category] || ''} · ${esc(r.note || '')}<div class="m">${new Date(r.created_at).toLocaleString('fa-IR')}${giftOf[r.ref_id] ? ` · هدیه‌ی شما +${fa(giftOf[r.ref_id])}` : ''}</div></span>
+        <span><b>${fa(r.amount_toman || 0)}</b> <span class="m">تومان</span><div class="m" style="text-align:left">−${fa(-r.delta)} امتیاز</div></span><button class="s" onclick="undoSpend('${r.ref_id}')">برگرداندن</button></div>`).join('') || '<div class="m" style="margin-top:8px">هنوز خرجی ثبت نشده.</div>'}</div>`;
+    return `${spendCard}<div class="card"><div class="big">${fa(bal)}</div><div class="m">این هفته: +${fa(week)}</div>
       <div class="row"><input id="md" type="number" placeholder="+۵ یا −۳"><input id="mn" placeholder="دلیل"><button onclick="manual()">ثبت</button></div>
       <button class="g" style="margin-top:8px" onclick="closeMonth()">بستن ماه و تبدیل به پول</button></div>
       <div class="card"><b>⚠ جریمه‌ی روزانه</b><div class="m">هر جریمه برای هر روز یک بار ثبت می‌شود. امتیاز از موجودی کم می‌شود.</div>
@@ -290,6 +300,10 @@ const views = {
       <div class="card"><b>تایید خودکار تکلیف</b><div class="m">اگر نمره‌ی هوش مصنوعی (از ۲۰) حداقل این‌قدر بود، امتیاز خودکار داده شود. خالی = همیشه خودم تایید می‌کنم.</div>
       <div class="row"><input id="aa" type="number" value="${st?.auto_approve_score ?? ''}"><button onclick="saveAuto()">ذخیره</button></div></div>
       <div class="card"><b>جریمه‌ی خودکار</b><div class="m">اگر کاری که جریمه دارد دیروز انجام نشد، امتیاز جریمه‌ی همان کار کم می‌شود. جریمه‌ی هر کار را در تب «کارها» تعیین کن.</div><label><input type="checkbox" id="ap" style="width:auto" ${kid.auto_penalty ? 'checked' : ''}> فعال باشد</label></div>
+      <div class="card"><b>🔔 یادآوری صوتی</b><div class="m">اگر کار انجام‌نشده دارد، گوشی بچه اول هر ساعت می‌گوید: «${esc(kid.name)} جان، کارهات منتظرتن. نمیای؟» (بیرون از ساعت‌های استراحت)</div>
+      <label class="m"><input type="checkbox" id="rmo" style="width:auto" ${kid.reminder_on === false ? '' : 'checked'}> روشن باشد</label>
+      <div class="m">ساعت‌های استراحت (بدون یادآوری)، مثلاً 23-10,14-18</div><input id="rmq" dir="ltr" value="${esc(kid.reminder_quiet ?? '23-10,14-18')}">
+      <button onclick="saveReminder()">ذخیره</button></div>
       <div class="card"><b>دیکته</b>
       <label class="m"><input type="checkbox" id="dr" style="width:auto" ${st?.dictation_requires_review === false ? '' : 'checked'}> متن عکس کتاب قبل از دیکته را من تایید کنم</label>
       <div class="m">امتیاز پیش‌فرض هر دیکته</div><input id="dpt" type="number" value="${st?.dictation_points ?? 10}">
@@ -405,6 +419,11 @@ async function manual() {
   await sb.from('points_ledger').insert({ kid_id: st.kid, delta: d, reason: d > 0 ? 'manual' : 'penalty', note: val('mn') || null });
   render();
 }
+async function undoSpend(ref) {
+  if (!ref || ref === 'null' || !confirm('این خرج برگردانده شود؟ امتیازش (و هدیه‌ی سرمایه‌گذاری‌اش) به حالت قبل برمی‌گردد.')) return;
+  await sb.from('points_ledger').delete().eq('ref_id', ref).in('reason', ['spend', 'invest_gift']);
+  render();
+}
 async function closeMonth() {
   const bal = await balance(st.kid); if (bal <= 0) return alert('امتیازی نیست.');
   if (!confirm(`${bal} امتیاز = ${bal * st.rate} تومان. ماه بسته شود و امتیاز صفر شود؟`)) return;
@@ -436,6 +455,12 @@ async function lookup() {
 async function bought(id) { await sb.from('wishlist').update({ status: 'bought' }).eq('id', id); render(); }
 async function dropWish(id) { await sb.from('wishlist').update({ status: 'dropped' }).eq('id', id); render(); }
 async function saveRate() { st.rate = +val('rt') || 1000; await sb.from('settings').update({ toman_per_point: st.rate }).eq('id', 1); alert('ذخیره شد'); }
+async function saveReminder() {
+  const q = val('rmq').trim();
+  if (q && !/^(\d{1,2}-\d{1,2})(,\d{1,2}-\d{1,2})*$/.test(q)) return alert('به شکل 23-10,14-18 بنویس');
+  await sb.from('kids').update({ reminder_on: !!$('#rmo')?.checked, reminder_quiet: q }).eq('id', st.kid);
+  alert('ذخیره شد'); boot();
+}
 async function saveKid() {
   const u = { daily_limit_min: +val('dl') || 120, bonus_under_min: val('bu') ? +val('bu') : null, bonus_points: +val('bp') || 0, auto_penalty: !!$('#ap')?.checked };
   if (val('kp')) { if (!/^\d{4,8}$/.test(val('kp'))) return alert('رمز باید ۴ تا ۸ رقم باشد.'); u.pin_hash = await sha(val('kp')); }

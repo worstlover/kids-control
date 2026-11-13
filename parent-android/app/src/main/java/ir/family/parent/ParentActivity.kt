@@ -135,7 +135,7 @@ class ParentActivity : Activity() {
     }
 
     private fun loadKids(root: LinearLayout) = async {
-        val list = api.get("kids?active=eq.true&select=id,name,auto_penalty&order=name")
+        val list = api.get("kids?active=eq.true&select=id,name,auto_penalty,reminder_on,reminder_quiet&order=name")
         runOnUiThread {
             kids = list
             if (kidId.isEmpty() || currentKid() == null) kidId = if (list.length() > 0) list.getJSONObject(0).getString("id") else ""
@@ -166,26 +166,82 @@ class ParentActivity : Activity() {
         }
     }
 
-    // ================= today: approvals and penalties =================
+    // ================= today: grouped by what the parent has to do =================
+    private fun sectionHead(text: String, color: Int): View = ui.text(text, 18f, color, true).apply { setPadding(ui.dp(4), ui.dp(18), 0, ui.dp(4)) }
+
+    private fun countChip(label: String, n: Int, color: Int): View = ui.chip("$label ${fa(n)}", if (n > 0) color else Pal.TRACK, if (n > 0) Color.WHITE else Pal.MUTED)
+
     private fun today() {
         content.removeAllViews()
         content.addView(ui.title("📋 امروز"))
         val day = Api.today()
         async {
-            val logs = api.get("task_logs?select=id,status,points_awarded,tasks(title,points)&kid_id=eq.$kidId&due_date=eq.$day")
+            val logs = api.get("task_logs?select=id,status,points_awarded,ai_score,ai_feedback,tasks(title,points,due_time,needs_photo)&kid_id=eq.$kidId&due_date=eq.$day")
             val bal = api.get("kid_balance?kid_id=eq.$kidId").optJSONObject(0)?.optLong("points", 0) ?: 0L
+            val todayRows = api.get("points_ledger?kid_id=eq.$kidId&created_at=gte.${day}T00:00:00%2B03:30&select=delta")
+            val dicts = api.get("dictations?kid_id=eq.$kidId&status=in.(review,graded)&select=id,title,status,ai_score,ai_feedback,points,points_awarded")
             val pens = api.get("penalty_rules?kid_id=eq.$kidId&active=eq.true&select=id,title,points")
             val done = api.get("penalty_logs?kid_id=eq.$kidId&day=eq.$day&select=rule_id")
             val doneIds = (0 until done.length()).map { done.getJSONObject(it).getString("rule_id") }.toSet()
+            val all = (0 until logs.length()).map { logs.getJSONObject(it) }
+            val waiting = all.filter { it.getString("status") in setOf("submitted", "graded") }
+            val todo = all.filter { it.getString("status") == "pending" }
+            val redo = all.filter { it.getString("status") == "rejected" }
+            val ok = all.filter { it.getString("status") == "approved" }
+            val dWait = (0 until dicts.length()).map { dicts.getJSONObject(it) }
+            val gained = (0 until todayRows.length()).sumOf { maxOf(0, todayRows.getJSONObject(it).getInt("delta")) }
             runOnUiThread {
                 content.addView(ui.card().apply {
-                    addView(ui.text("موجودی امتیاز", 14f, Pal.MUTED, true))
-                    addView(ui.text(fa(bal), 36f, Pal.PURPLE, true))
+                    val r = ui.row()
+                    r.addView(LinearLayout(this@ParentActivity).apply {
+                        orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+                        addView(ui.text("موجودی امتیاز", 14f, Pal.MUTED, true))
+                        addView(ui.text(fa(bal), 36f, Pal.PURPLE, true))
+                    })
+                    r.addView(ui.text("امروز +${fa(gained)}", 16f, Pal.GREEN, true))
+                    addView(r)
+                    addView(chipRow(listOf(
+                        countChip("⏳ منتظر تایید", waiting.size + dWait.count { it.getString("status") == "graded" }, Pal.ORANGE),
+                        countChip("🕓 انجام‌نشده", todo.size, Pal.BLUE),
+                        countChip("🔁 رد شده", redo.size, Pal.RED),
+                        countChip("✅ تایید شده", ok.size, Pal.GREEN),
+                    )))
                 })
-                if (logs.length() == 0) content.addView(ui.text("برای امروز کاری ثبت نشده.", 15f, Pal.MUTED))
-                for (i in 0 until logs.length()) content.addView(logCard(logs.getJSONObject(i)))
+                if (all.isEmpty() && dWait.isEmpty()) content.addView(ui.text("برای امروز کاری ثبت نشده.", 15f, Pal.MUTED))
+
+                // 1) what needs the parent now
+                val gradedDicts = dWait.filter { it.getString("status") == "graded" }
+                if (waiting.isNotEmpty() || gradedDicts.isNotEmpty()) {
+                    content.addView(sectionHead("⏳ منتظر تایید شما (${fa(waiting.size + gradedDicts.size)})", Pal.ORANGE))
+                    if (waiting.size > 1) content.addView(ui.pill("✅ تایید همه‌ی کارهای منتظر", Pal.GREEN) { approveAll(waiting) })
+                    waiting.forEach { content.addView(logCard(it)) }
+                    gradedDicts.forEach { content.addView(dictCard(it)) }
+                }
+                dWait.filter { it.getString("status") == "review" }.takeIf { it.isNotEmpty() }?.let { rv ->
+                    content.addView(ui.card().apply {
+                        addView(ui.text("📖 ${fa(rv.size)} دیکته منتظر تایید متن است", 15f, Pal.INK, true))
+                        addView(ui.text("متن را در پنل وب (تب «دیکته») با کتاب مقایسه و تایید کن: " + rv.joinToString("، ") { it.getString("title") }, 13f, Pal.MUTED))
+                    })
+                }
+                // 2) not done yet
+                if (todo.isNotEmpty()) {
+                    content.addView(sectionHead("🕓 هنوز انجام نداده (${fa(todo.size)})", Pal.BLUE))
+                    todo.forEach { content.addView(logCard(it)) }
+                }
+                // 3) sent back
+                if (redo.isNotEmpty()) {
+                    content.addView(sectionHead("🔁 رد شده؛ باید دوباره انجام دهد (${fa(redo.size)})", Pal.RED))
+                    redo.forEach { content.addView(logCard(it)) }
+                }
+                // 4) done
+                if (ok.isNotEmpty()) {
+                    val pts = ok.sumOf { if (it.isNull("points_awarded")) 0 else it.getInt("points_awarded") }
+                    content.addView(sectionHead("✅ تایید شده (${fa(ok.size)}) · +${fa(pts)} امتیاز", Pal.GREEN))
+                    ok.forEach { content.addView(logCard(it)) }
+                }
+
                 if (pens.length() > 0) {
-                    content.addView(ui.title("⚠️ جریمه‌ی امروز"))
+                    content.addView(sectionHead("⚠️ جریمه‌ی امروز", Pal.RED))
                     for (i in 0 until pens.length()) {
                         val p = pens.getJSONObject(i)
                         content.addView(ui.card().apply {
@@ -202,27 +258,80 @@ class ParentActivity : Activity() {
     private fun logCard(log: JSONObject): View {
         val t = log.getJSONObject("tasks")
         val status = log.getString("status")
-        val label = mapOf("pending" to "انجام نشده", "submitted" to "منتظر تایید", "graded" to "نمره گرفت؛ منتظر تایید امتیاز",
-            "approved" to "تایید شد ✓", "rejected" to "رد شد").getOrDefault(status, status)
+        val (label, color) = when (status) {
+            "pending" -> Pair("🕓 انجام نشده", Pal.BLUE)
+            "submitted" -> Pair("⏳ انجام داده؛ منتظر تایید شما", Pal.ORANGE)
+            "graded" -> Pair("⏳ هوش مصنوعی نمره داد؛ منتظر تایید امتیاز", Pal.ORANGE)
+            "approved" -> Pair("✅ تایید شد", Pal.GREEN)
+            "rejected" -> Pair("🔁 رد شد؛ باید دوباره انجام دهد", Pal.RED)
+            else -> Pair(status, Pal.MUTED)
+        }
         val card = ui.card()
-        card.addView(ui.text("${t.getString("title")} · ${fa(t.getInt("points"))} امتیاز", 17f, Pal.INK, true))
-        card.addView(ui.text(label, 14f, Pal.MUTED))
+        val top = ui.row()
+        top.addView(ui.text(t.getString("title"), 17f, Pal.INK, true).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
+        val pts = if (status == "approved" && !log.isNull("points_awarded")) log.getInt("points_awarded") else t.getInt("points")
+        top.addView(ui.chip("⭐ ${fa(pts)}", Pal.YELLOW, Pal.INK))
+        card.addView(top)
+        card.addView(ui.text(label + (if (!t.isNull("due_time") && status == "pending") " · تا ساعت ${fa(t.getString("due_time"))}" else "") +
+            (if (t.optBoolean("needs_photo") && status == "pending") " · با عکس" else ""), 14f, color, true))
+        if (!log.isNull("ai_score")) card.addView(ui.text("نمره‌ی هوش مصنوعی: ${fa(log.getDouble("ai_score").toString().removeSuffix(".0"))} از ۲۰", 14f, Pal.INK))
+        if (!log.isNull("ai_feedback")) card.addView(ui.text(log.getString("ai_feedback"), 13f, Pal.MUTED))
         val row = ui.row()
-        if (status != "approved") row.addView(ui.pill("✅ تایید", Pal.GREEN) { approve(log) }
-            .apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = ui.dp(6) } })
-        if (status != "rejected") row.addView(ui.pill(if (status == "approved") "↩ لغو" else "❌ رد", Pal.RED) { reject(log) }
-            .apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
+        when (status) {
+            "submitted", "graded" -> {
+                row.addView(ui.pill("✅ تایید", Pal.GREEN) { approve(log) }.apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = ui.dp(6) } })
+                row.addView(ui.pill("❌ رد", Pal.RED) { reject(log) }.apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
+            }
+            "pending", "rejected" -> row.addView(ui.pill("✅ انجام داد (تایید دستی)", Pal.GREEN) { approve(log) }.apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
+            "approved" -> row.addView(ui.pill("↩ لغو تایید", Pal.MUTED) { reject(log) }.apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
+        }
         card.addView(row)
         return card
     }
 
-    private fun approve(log: JSONObject) = async {
+    private fun dictCard(d: JSONObject): View = ui.card().apply {
+        val top = ui.row()
+        top.addView(ui.text("📖 دیکته: ${d.getString("title")}", 17f, Pal.INK, true).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
+        top.addView(ui.chip("⭐ ${fa(if (d.isNull("points_awarded")) d.optInt("points") else d.getInt("points_awarded"))}", Pal.YELLOW, Pal.INK))
+        addView(top)
+        addView(ui.text("⏳ نوشت و نمره گرفت؛ منتظر تایید امتیاز", 14f, Pal.ORANGE, true))
+        if (!d.isNull("ai_score")) addView(ui.text("نمره: ${fa(d.getDouble("ai_score").toString().removeSuffix(".0"))} از ۲۰", 14f, Pal.INK))
+        if (!d.isNull("ai_feedback")) addView(ui.text(d.getString("ai_feedback"), 13f, Pal.MUTED))
+        val row = ui.row()
+        row.addView(ui.pill("✅ تایید و امتیاز", Pal.GREEN) { approveDict(d) }.apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = ui.dp(6) } })
+        row.addView(ui.pill("✍️ دوباره بنویسد", Pal.RED) { rejectDict(d) }.apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
+        addView(row)
+    }
+
+    private fun approveDict(d: JSONObject) = async {
+        val pts = if (d.isNull("points_awarded")) d.optInt("points") else d.getInt("points_awarded")
+        val changed = api.write("PATCH", "dictations?id=eq.${d.getString("id")}&status=eq.graded", JSONObject().put("status", "done").put("points_awarded", pts))
+        if (changed != null && pts > 0) api.write("POST", "points_ledger", JSONObject().put("kid_id", kidId).put("delta", pts).put("reason", "task")
+            .put("ref_id", d.getString("id")).put("note", "دیکته: " + d.getString("title")))
+        runOnUiThread { toast("تایید شد ✓"); render() }
+    }
+
+    private fun rejectDict(d: JSONObject) = async {
+        api.send("PATCH", "dictations?id=eq.${d.getString("id")}", JSONObject().put("status", "ready").put("done_day", JSONObject.NULL)
+            .put("ai_score", JSONObject.NULL).put("ai_feedback", JSONObject.NULL).put("points_awarded", JSONObject.NULL).put("answer_photo_path", JSONObject.NULL))
+        runOnUiThread { toast("دوباره می‌نویسد"); render() }
+    }
+
+    private fun approveAll(list: List<JSONObject>) {
+        AlertDialog.Builder(this).setMessage("${fa(list.size)} کار تایید و امتیازشان داده شود؟")
+            .setPositiveButton("تایید همه") { _, _ -> async { list.forEach { approveNow(it) }; runOnUiThread { toast("همه تایید شدند ✓"); render() } } }
+            .setNegativeButton("انصراف", null).show()
+    }
+
+    private fun approve(log: JSONObject) = async { approveNow(log); runOnUiThread { toast("تایید شد ✓"); render() } }
+
+    /** Approve one task and give its points (the status filter stops a double click from paying twice). */
+    private fun approveNow(log: JSONObject) {
         val t = log.getJSONObject("tasks")
         val pts = if (log.isNull("points_awarded")) t.getInt("points") else log.getInt("points_awarded")
-        api.send("PATCH", "task_logs?id=eq.${log.getString("id")}", JSONObject().put("status", "approved").put("points_awarded", pts))
-        if (pts > 0) api.write("POST", "points_ledger", JSONObject().put("kid_id", kidId).put("delta", pts).put("reason", "task")
+        val changed = api.write("PATCH", "task_logs?id=eq.${log.getString("id")}&status=neq.approved", JSONObject().put("status", "approved").put("points_awarded", pts))
+        if (changed != null && pts > 0) api.write("POST", "points_ledger", JSONObject().put("kid_id", kidId).put("delta", pts).put("reason", "task")
             .put("ref_id", log.getString("id")).put("note", t.getString("title")))
-        runOnUiThread { toast("تایید شد ✓"); render() }
     }
 
     private fun reject(log: JSONObject) = async {
@@ -269,9 +378,11 @@ class ParentActivity : Activity() {
             val others = (0 until kids.length()).map { kids.getJSONObject(it) }.filter { it.getString("id") != kidId }
             runOnUiThread {
                 if (list.length() == 0) content.addView(ui.text("هنوز کاری نیست.", 15f, Pal.MUTED))
-                for (i in 0 until list.length()) {
-                    val t = list.getJSONObject(i)
-                    content.addView(ui.card().apply {
+                val items = (0 until list.length()).map { list.getJSONObject(it) }
+                val groups = items.groupBy { groupOf(it) }.toSortedMap(compareBy { it.first })
+                for ((g, inGroup) in groups) {
+                    content.addView(sectionHead("${g.second} (${fa(inGroup.size)})", Pal.PURPLE))
+                    for (t in inGroup.sortedWith(compareBy({ it.isNull("due_time") }, { it.optString("due_time") }, { it.getString("title") }))) content.addView(ui.card().apply {
                         addView(ui.text(t.getString("title"), 17f, Pal.INK, true))
                         addView(ui.text(scheduleText(t) + (if (t.isNull("due_time")) "" else " · تا ساعت ${t.getString("due_time")}") +
                             " · ${fa(t.getInt("points"))} امتیاز" + (if (t.getInt("penalty_points") > 0) " · جریمه ${fa(t.getInt("penalty_points"))}" else ""), 14f, Pal.MUTED))
@@ -293,6 +404,19 @@ class ParentActivity : Activity() {
                         setOnClickListener { copyAll(list, o.getString("id")) } } }))
                 })
             }
+        }
+    }
+
+    /** Which group a task is listed under: by how often it repeats. */
+    private fun groupOf(t: JSONObject): Pair<Int, String> {
+        val type = t.optJSONObject("schedule")?.optString("type")?.takeIf { it.isNotEmpty() }
+            ?: when (t.optString("kind")) { "weekly" -> "weekdays"; "once" -> "once"; else -> "daily" }
+        return when (type) {
+            "weekdays" -> Pair(1, "🗓 روزهای مشخص هفته")
+            "interval" -> Pair(2, "🔁 هر چند روز یک‌بار")
+            "monthly" -> Pair(3, "📆 ماهانه")
+            "once" -> Pair(4, "1️⃣ یک‌بار")
+            else -> Pair(0, "📅 هر روز")
         }
     }
 
@@ -450,20 +574,80 @@ class ParentActivity : Activity() {
         }
     }
 
-    // ================= points: balance, manual, month close =================
+    // ================= points: balance, where points came from / went, filtered history =================
+    private var pFilter = "all"
+
+    /** Same groups as the kid's wallet on the server (ledgerSource). */
+    private fun sourceOf(r: JSONObject): String {
+        val note = if (r.isNull("note")) "" else r.getString("note")
+        val d = r.getInt("delta")
+        return when (r.getString("reason")) {
+            "task" -> when {
+                note.startsWith("دیکته") -> "dictation"
+                Regex("^(تمرین معلم|کلاس آزاد|آزمون خروج|جواب روی تخته|یاد دادن)").containsMatchIn(note) -> "tutor"
+                else -> "tasks"
+            }
+            "screen_bonus" -> "bonus"
+            "manual" -> if (d >= 0) "gift" else "penalty"
+            "penalty" -> "penalty"
+            "payout" -> "payout"
+            "invest_gift" -> "invest_gift"
+            "spend" -> if (r.isNull("category")) "spend" else r.getString("category")
+            else -> "other"
+        }
+    }
+
+    private val SOURCE_LABEL = mapOf(
+        "tasks" to "✅ کارها", "dictation" to "✏️ دیکته", "tutor" to "🎓 معلم", "bonus" to "🌟 جایزه‌ی کم‌بازی", "gift" to "🎁 هدیه‌ی دستی",
+        "invest_gift" to "📈 هدیه‌ی سرمایه‌گذاری", "penalty" to "⚠️ جریمه", "payout" to "💰 تبدیل به پول",
+        "snack" to "🍫 خوراکی", "fun" to "🧸 سرگرمی و اسباب‌بازی", "invest" to "📈 سرمایه‌گذاری", "spend" to "💸 خرج", "other" to "•",
+    )
+
+    private fun bar(label: String, v: Int, max: Int, color: Int): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL; setPadding(0, ui.dp(6), 0, 0)
+        val r = ui.row()
+        r.addView(ui.text(label, 14f, Pal.INK).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
+        r.addView(ui.text(fa(v), 14f, Pal.INK, true))
+        addView(r)
+        addView(BarView(this@ParentActivity).apply { fraction = if (max > 0) v / max.toFloat() else 0f; barColor = color; barColor2 = color
+            layoutParams = LinearLayout.LayoutParams(-1, ui.dp(10)).apply { topMargin = ui.dp(3) } })
+    }
+
     private fun points() {
         content.removeAllViews()
         content.addView(ui.title("🪙 امتیاز"))
         async {
             val bal = api.get("kid_balance?kid_id=eq.$kidId").optJSONObject(0)?.optLong("points", 0) ?: 0L
             val rate = api.get("settings?id=eq.1&select=toman_per_point").optJSONObject(0)?.optDouble("toman_per_point", 1000.0) ?: 1000.0
-            val ledger = api.get("points_ledger?kid_id=eq.$kidId&order=created_at.desc&limit=20&select=delta,note,reason")
+            val ledger = api.get("points_ledger?kid_id=eq.$kidId&order=created_at.desc&limit=300&select=delta,note,reason,category,amount_toman,ref_id,created_at")
+            val rows = (0 until ledger.length()).map { ledger.getJSONObject(it) }
             runOnUiThread {
                 content.addView(ui.card().apply {
                     addView(ui.text("موجودی", 14f, Pal.MUTED, true))
                     addView(ui.text(fa(bal), 40f, Pal.PURPLE, true))
                     addView(ui.text("≈ ${fa((bal * rate).toLong())} تومان", 15f, Pal.MUTED))
                 })
+
+                // last 30 days at a glance
+                val since = java.time.LocalDate.now(TEHRAN).minusDays(30).toString()
+                val recent = rows.filter { it.getString("created_at") >= since }
+                val earned = recent.filter { it.getInt("delta") > 0 && it.getString("reason") != "spend" }.groupBy { sourceOf(it) }.mapValues { e -> e.value.sumOf { it.getInt("delta") } }
+                val spent = recent.filter { it.getString("reason") == "spend" }.groupBy { sourceOf(it) }.mapValues { e -> e.value.sumOf { -it.getInt("delta") } }
+                val spentToman = recent.filter { it.getString("reason") == "spend" }.groupBy { sourceOf(it) }.mapValues { e -> e.value.sumOf { it.optLong("amount_toman", 0) } }
+                val lost = recent.filter { sourceOf(it) == "penalty" }.sumOf { -it.getInt("delta") }
+                content.addView(ui.card().apply {
+                    addView(ui.text("۳۰ روز اخیر", 16f, Pal.INK, true))
+                    addView(ui.text("📥 کسب‌شده: +${fa(earned.values.sum())}", 15f, Pal.GREEN, true))
+                    val mx = earned.values.maxOrNull() ?: 0
+                    earned.entries.sortedByDescending { it.value }.forEach { addView(bar(SOURCE_LABEL[it.key] ?: it.key, it.value, mx, Pal.BLUE)) }
+                    if (lost > 0) addView(ui.text("⚠️ جریمه‌ها: −${fa(lost)}", 15f, Pal.RED, true).apply { setPadding(0, ui.dp(10), 0, 0) })
+                    if (spent.isNotEmpty()) {
+                        addView(ui.text("📤 خرج‌های بچه: −${fa(spent.values.sum())} (${fa(spentToman.values.sum())} تومان)", 15f, Pal.ORANGE, true).apply { setPadding(0, ui.dp(10), 0, 0) })
+                        val ms = spent.values.maxOrNull() ?: 0
+                        spent.entries.sortedByDescending { it.value }.forEach { addView(bar((SOURCE_LABEL[it.key] ?: it.key) + " · ${fa(spentToman[it.key] ?: 0)} تومان", it.value, ms, Pal.ORANGE)) }
+                    }
+                })
+
                 val manual = ui.card()
                 manual.addView(ui.text("امتیاز دستی", 16f, Pal.INK, true))
                 val amt = input("مثلاً +۵ یا −۳", "", true)
@@ -482,19 +666,46 @@ class ParentActivity : Activity() {
                 content.addView(ui.pill("🎁 بستن ماه و تبدیل به پول", Pal.ORANGE) {
                     if (bal <= 0) toast("امتیازی برای بستن نیست") else confirmClose(bal, rate)
                 })
-                content.addView(ui.title("آخرین حرکت‌ها"))
-                for (i in 0 until ledger.length()) {
-                    val r = ledger.getJSONObject(i)
+
+                // history, filtered
+                content.addView(ui.title("حرکت‌های امتیاز"))
+                val filters = listOf("all" to "همه", "earn" to "📥 کسب", "lose" to "⚠️ جریمه", "spend" to "📤 خرج بچه", "payout" to "💰 تبدیل به پول")
+                content.addView(chipRow(filters.map { (k, l) -> ui.chip(l, if (pFilter == k) Pal.PURPLE else Pal.TRACK, if (pFilter == k) Color.WHITE else Pal.INK).apply { setOnClickListener { pFilter = k; render() } } }))
+                val shown = rows.filter { r ->
+                    val src = sourceOf(r)
+                    when (pFilter) {
+                        "earn" -> r.getInt("delta") > 0 && r.getString("reason") != "spend" && src != "payout"
+                        "lose" -> src == "penalty"
+                        "spend" -> r.getString("reason") == "spend"
+                        "payout" -> src == "payout"
+                        else -> r.getString("reason") != "invest_gift"      // the gift is shown on its spend row
+                    }
+                }.take(60)
+                val giftOf = rows.filter { it.getString("reason") == "invest_gift" && !it.isNull("ref_id") }.associate { it.getString("ref_id") to it.getInt("delta") }
+                if (shown.isEmpty()) content.addView(ui.text("چیزی نیست.", 15f, Pal.MUTED))
+                shown.forEach { r ->
                     val d = r.getInt("delta")
+                    val src = sourceOf(r)
                     content.addView(ui.card().apply {
                         addView(ui.row().apply {
-                            addView(ui.text(if (r.isNull("note")) r.getString("reason") else r.getString("note"), 15f, Pal.INK).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
+                            addView(ui.text((SOURCE_LABEL[src] ?: "") + "  " + (if (r.isNull("note")) "" else r.getString("note")), 15f, Pal.INK).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) })
                             addView(ui.text((if (d > 0) "+" else "−") + fa(Math.abs(d)), 16f, if (d > 0) Pal.GREEN else Pal.RED, true))
                         })
+                        val date = r.getString("created_at").take(10)
+                        val extra = if (r.getString("reason") == "spend") " · ${fa(r.optLong("amount_toman", 0))} تومان" + (giftOf[r.optString("ref_id")]?.let { " · هدیه‌ی شما +${fa(it)}" } ?: "") else ""
+                        addView(ui.text(fa(date) + extra, 12f, Pal.MUTED))
+                        if (r.getString("reason") == "spend" && !r.isNull("ref_id")) addView(ui.pill("↩ برگرداندن این خرج", Pal.MUTED) { undoSpend(r.getString("ref_id")) })
                     })
                 }
             }
         }
+    }
+
+    private fun undoSpend(ref: String) {
+        AlertDialog.Builder(this).setMessage("این خرج برگردانده شود؟ امتیازش (و هدیه‌ی سرمایه‌گذاری‌اش) به حالت قبل برمی‌گردد.")
+            .setPositiveButton("برگرداندن") { _, _ ->
+                async { api.send("DELETE", "points_ledger?ref_id=eq.$ref&reason=in.(spend,invest_gift)"); runOnUiThread { toast("برگردانده شد"); render() } }
+            }.setNegativeButton("انصراف", null).show()
     }
 
     private fun confirmClose(bal: Long, rate: Double) {
@@ -542,6 +753,24 @@ class ParentActivity : Activity() {
                         setOnCheckedChangeListener { _, on -> async { api.send("PATCH", "kids?id=eq.$kidId", JSONObject().put("auto_penalty", on)) } }
                     })
                     content.addView(a)
+
+                    val rm = ui.card()
+                    rm.addView(ui.text("🔔 یادآوری صوتی ${kid.getString("name")}", 16f, Pal.INK, true))
+                    rm.addView(ui.text("اگر کار انجام‌نشده دارد، گوشی‌اش هر ساعت (اول ساعت) می‌گوید: «${kid.getString("name")} جان، کارهات منتظرتن. نمیای؟»", 13f, Pal.MUTED))
+                    rm.addView(CheckBox(this).apply {
+                        text = "روشن باشد"
+                        isChecked = kid.optBoolean("reminder_on", true)
+                        setOnCheckedChangeListener { _, on -> async { api.send("PATCH", "kids?id=eq.$kidId", JSONObject().put("reminder_on", on)); kid.put("reminder_on", on) } }
+                    })
+                    rm.addView(ui.text("ساعت‌های استراحت (بدون یادآوری)، مثلاً 23-10,14-18", 13f, Pal.MUTED))
+                    val q = input("23-10,14-18", kid.optString("reminder_quiet", "23-10,14-18"))
+                    rm.addView(q)
+                    rm.addView(ui.pill("ذخیره‌ی ساعت‌ها", Pal.PURPLE) {
+                        val v = q.text.toString().trim()
+                        if (!Regex("^(\\d{1,2}-\\d{1,2})(,\\d{1,2}-\\d{1,2})*$").matches(v) && v.isNotEmpty()) return@pill toast("به شکل 23-10,14-18 بنویس")
+                        async { api.send("PATCH", "kids?id=eq.$kidId", JSONObject().put("reminder_quiet", v)); kid.put("reminder_quiet", v); runOnUiThread { toast("ذخیره شد ✓") } }
+                    })
+                    content.addView(rm)
                 }
 
                 content.addView(ui.pill("🚪 خروج از حساب", Pal.MUTED) { api.logout(); recreate() })

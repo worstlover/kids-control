@@ -95,6 +95,7 @@ class GuardService : AccessibilityService() {
             if (counted && Policy.decide(pkg, c).allowed) prefs.addUsage(Sync.today(), kid.id, pkg, dt)
         }
         if (pkg != null && screenOn) enforce(pkg)   // re-check: the limit may have just been reached
+        try { Reminder.maybeRemind(applicationContext, prefs, st) } catch (e: Exception) { Log.e("Guard", "reminder", e) }
         if (now - lastSync > 60_000) {
             lastSync = now
             io.execute { try { Sync.syncNow(applicationContext) } catch (e: Exception) { Log.e("Guard", "sync", e) } }

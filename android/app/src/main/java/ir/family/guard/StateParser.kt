@@ -37,6 +37,7 @@ object StateParser {
                 k.optJSONArray("week_points")?.let { a -> (0 until a.length()).map { a.getInt(it) } } ?: emptyList(),
                 k.optInt("screen_min_today", 0),
                 k.optJSONArray("penalties").mapObjs { p -> PenaltyItem(p.getString("title"), p.optInt("points", 0)) },
+                k.optBoolean("reminder_on", true), k.optString("reminder_quiet", "23-10,14-18"),
             )
         }, o.optJSONArray("week_days")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList())
     } catch (e: Exception) { null }

@@ -26,6 +26,8 @@ data class Kid(
     val weekPoints: List<Int> = emptyList(),   // points earned per day, last 7 days (oldest first)
     val screenMinToday: Int = 0,
     val penalties: List<PenaltyItem> = emptyList(),
+    val reminderOn: Boolean = true,                 // hourly voice reminder when tasks are waiting
+    val reminderQuiet: String = "23-10,14-18",       // hours with no reminder
 )
 
 object Policy {

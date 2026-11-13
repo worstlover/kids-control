@@ -272,6 +272,43 @@ create table if not exists tutor_concepts (
 create index if not exists tutor_concepts_due on tutor_concepts (kid_id, subject, next_review);
 alter table tutor_profiles add column if not exists level_changed_at timestamptz;   -- level moves with recent results; only results after the last move count
 
+-- v7: kid wallet — spending points (snack / fun & toys / investment with a 20% parent gift)
+alter table points_ledger drop constraint if exists points_ledger_reason_check;
+alter table points_ledger add constraint points_ledger_reason_check
+  check (reason in ('task','screen_bonus','penalty','manual','payout','spend','invest_gift'));
+alter table points_ledger add column if not exists category text;          -- spend: snack | fun | invest
+alter table points_ledger add column if not exists amount_toman bigint;    -- spend: the money amount the kid typed
+create index if not exists points_ledger_kid on points_ledger (kid_id, created_at);
+
+-- v7: wish price lookups from the kid's phone (each costs an AI call; limited per day)
+create table if not exists wish_lookups (
+  id uuid primary key default gen_random_uuid(),
+  kid_id uuid not null references kids on delete cascade,
+  day date not null,
+  created_at timestamptz default now()
+);
+
+-- v7: school lessons are taught from the book; what the AI made once is kept and reused
+alter table tutor_lessons add column if not exists content text;                 -- the book text of the lesson (all pages photographed so far)
+alter table tutor_lessons add column if not exists pages int not null default 0;
+alter table tutor_exercises add column if not exists ai boolean not null default true;   -- false = rebuilt from the cache, no AI call
+create table if not exists tutor_cache (
+  id uuid primary key default gen_random_uuid(),
+  kid_id uuid not null references kids on delete cascade,
+  subject text not null,
+  key text not null,                         -- 'lesson:<id>:<section>' | 'lesson:<id>' | 'topic:<text>'
+  kind text not null check (kind in ('explain','questions','exit','dictation')),
+  payload jsonb not null,
+  uses int not null default 0,
+  created_at timestamptz default now(),
+  last_used timestamptz
+);
+create index if not exists tutor_cache_key on tutor_cache (kid_id, key, kind);
+
+-- v8: hourly voice reminder on the kid's phone when tasks are waiting (not in the quiet hours)
+alter table kids add column if not exists reminder_on boolean not null default true;
+alter table kids add column if not exists reminder_quiet text not null default '23-10,14-18';   -- hour ranges with no reminder, "start-end" (end not included)
+
 -- Installed apps reported by the phone (parent picks which are allowed)
 create table if not exists device_apps (
   device_id uuid not null references devices on delete cascade,
@@ -298,7 +335,7 @@ do $$
 declare t text;
 begin
   foreach t in array array['settings','kids','tasks','task_logs','app_rules','usage_logs',
-    'points_ledger','wishlist','month_closings','devices','device_commands','device_apps','dictations','tutor_profiles','tutor_plans','tutor_exercises','penalty_rules','penalty_logs','tutor_lessons','tutor_concepts']
+    'points_ledger','wishlist','month_closings','devices','device_commands','device_apps','dictations','tutor_profiles','tutor_plans','tutor_exercises','penalty_rules','penalty_logs','tutor_lessons','tutor_concepts','wish_lookups','tutor_cache']
   loop
     execute format('alter table %I enable row level security', t);
     execute format('drop policy if exists parent_all on %I', t);

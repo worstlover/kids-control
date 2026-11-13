@@ -8,7 +8,11 @@ import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.TextView
+import android.media.AudioManager
+import android.os.Build
 import android.os.Handler
+import android.view.KeyEvent
+import android.view.accessibility.AccessibilityWindowInfo
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
@@ -27,6 +31,7 @@ class GuardService : AccessibilityService() {
     private val io = Executors.newSingleThreadExecutor()
     private lateinit var prefs: Prefs
     private var cur: String? = null
+    private var pip: String? = null          // an app playing in picture-in-picture (a small floating video)
     private var lastTick = 0L
     private var lastSync = 0L
     private var lastToast = 0L
@@ -43,6 +48,7 @@ class GuardService : AccessibilityService() {
 
     private val secTicker = object : Runnable {
         override fun run() {
+            try { lookAtScreen() } catch (e: Exception) { Log.e("Guard", "screen", e) }
             try { updateChip() } catch (e: Exception) { Log.e("Guard", "chip", e) }
             h.postDelayed(this, 1000)
         }
@@ -71,10 +77,47 @@ class GuardService : AccessibilityService() {
         enforce(pkg)
     }
 
+    /**
+     * What is really on screen, read every second from the window list. The "window changed" events alone are not
+     * enough: after a system dialog (e.g. "open with…") or an ad closes over a stream, the phone often sends no new
+     * event, so the guard kept thinking the dialog was in front — the countdown vanished and the time was not counted.
+     */
+    private fun lookAtScreen() {
+        if (!prefs.configured) return
+        val screenOn = (getSystemService(POWER_SERVICE) as PowerManager).isInteractive
+        if (!screenOn) return
+        val skip = Env.overlays(this)
+        var front: String? = null; var floating: String? = null
+        try {
+            for (w in windows) {
+                if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+                val p = try { w.root?.packageName?.toString() } catch (e: Exception) { null } ?: continue
+                if (p in skip) continue
+                if (Build.VERSION.SDK_INT >= 26 && w.isInPictureInPictureMode) { if (floating == null) floating = p; continue }
+                if (front == null && (w.isFocused || w.isActive)) front = p
+            }
+        } catch (e: Exception) {}
+        if (front == null) front = try { rootInActiveWindow?.packageName?.toString()?.takeIf { it !in skip } } catch (e: Exception) { null }
+        pip = floating?.takeIf { it != front }
+        if (front != null && front != cur) { cur = front; enforce(front) }
+        pip?.let { p -> if (!Policy.decide(p, Env.buildCtx(this, prefs, state())).allowed) pausePlayback() }   // a floating video can't be sent "home"
+    }
+
+    /** Pauses whatever video/music is playing (also in picture-in-picture), so a blocked stream does not keep going. */
+    private fun pausePlayback() {
+        try {
+            val am = getSystemService(AUDIO_SERVICE) as AudioManager
+            if (!am.isMusicActive) return
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE))
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE))
+        } catch (e: Exception) {}
+    }
+
     private fun enforce(pkg: String) {
         if (!prefs.configured) return
         val dec = Policy.decide(pkg, Env.buildCtx(this, prefs, state()))
         if (!dec.allowed) {
+            pausePlayback()                          // streams often keep playing in a floating window after "home"
             performGlobalAction(GLOBAL_ACTION_HOME)
             val now = SystemClock.elapsedRealtime()
             if (now - lastToast > 3000) { lastToast = now; Toast.makeText(this, dec.reason.message, Toast.LENGTH_LONG).show() }
@@ -89,10 +132,12 @@ class GuardService : AccessibilityService() {
         val pkg = cur
         val kid = st?.kids?.firstOrNull { it.id == prefs.activeKid }
         val screenOn = (getSystemService(POWER_SERVICE) as PowerManager).isInteractive
-        if (pkg != null && kid != null && screenOn) {
+        if (kid != null && screenOn) {
             val c = Env.buildCtx(this, prefs, st)
-            val counted = pkg != packageName && pkg !in c.essential && !c.parentUnlocked && !c.grace && kid.rules.any { it.pkg == pkg && !it.alwaysOn }
-            if (counted && Policy.decide(pkg, c).allowed) prefs.addUsage(Sync.today(), kid.id, pkg, dt)
+            // the app in front, and a stream still playing in a floating window, both use up time
+            for (p in listOfNotNull(pkg, pip).distinct()) {
+                if (countable(p, kid, c) && Policy.decide(p, c).allowed) prefs.addUsage(Sync.today(), kid.id, p, dt)
+            }
         }
         if (pkg != null && screenOn) enforce(pkg)   // re-check: the limit may have just been reached
         try { Reminder.maybeRemind(applicationContext, prefs, st) } catch (e: Exception) { Log.e("Guard", "reminder", e) }
@@ -102,17 +147,24 @@ class GuardService : AccessibilityService() {
         }
     }
 
-    /** Live countdown floating over the app the kid is using, so the remaining time is always visible. */
+    /** Time in this app is counted (same test for counting and for showing the countdown, so they always agree). */
+    private fun countable(pkg: String, kid: Kid, c: Policy.Ctx): Boolean =
+        pkg != packageName && pkg !in c.essential && !c.parentUnlocked && !c.grace && kid.rules.any { it.pkg == pkg && !it.alwaysOn }
+
+    /**
+     * Live countdown floating over the app the kid is using (or over a floating video), so the remaining time is
+     * always visible while time is being counted.
+     */
     private fun updateChip() {
         if (!prefs.configured) return hideChip()
-        val pkg = cur
         val st = state()
         val kid = st?.kids?.firstOrNull { it.id == prefs.activeKid }
         val screenOn = (getSystemService(POWER_SERVICE) as PowerManager).isInteractive
-        if (pkg == null || kid == null || !screenOn) return hideChip()
+        if (kid == null || !screenOn) return hideChip()
         val c = Env.buildCtx(this, prefs, st)
-        val rule = kid.rules.firstOrNull { it.pkg == pkg }
-        if (pkg == packageName || pkg in c.essential || c.parentUnlocked || c.grace || rule == null || rule.category == "edu" || rule.alwaysOn) return hideChip()
+        val shown = { p: String? -> p != null && countable(p, kid, c) && kid.rules.firstOrNull { it.pkg == p }?.category != "edu" }
+        val pkg = listOf(cur, pip).firstOrNull { shown(it) } ?: return hideChip()
+        val rule = kid.rules.firstOrNull { it.pkg == pkg } ?: return hideChip()
         val unsaved = ((SystemClock.elapsedRealtime() - lastTick) / 1000).coerceIn(0, 5)   // seconds not yet written to usage
         val counted = kid.rules.filter { it.category != "edu" && !it.alwaysOn }.sumOf { c.usageSec[it.pkg] ?: 0L } + unsaved
         var left = (kid.dailyLimitMin + c.extraMin) * 60L - counted
